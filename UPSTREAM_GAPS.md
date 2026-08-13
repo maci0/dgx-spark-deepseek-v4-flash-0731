@@ -62,13 +62,27 @@ NVLink). The 2-node-1-GPU-each layout is broken. Model is 152GB so single-node i
   the GPU and dist port 25000 → the next deploy deadlocks at distributed init.
 - Needs a clean teardown that reliably reaps the mp children + releases the RoCE/NCCL state.
 
-## 7. LMCache / disk KV offload for large concurrent sessions — unvalidated
+## 7. LMCache / disk KV offload — TESTED, blocked by HMA vs sparse-MLA + DSpark
 On UMA (GB10), CPU/RAM offload is moot (shared memory). Disk-tier (LRU-spill-to-NVMe) is the useful
-lever for concurrent large coding sessions that exceed the RAM KV pool. Status:
-- vLLM's KV-connector framework **is present and MLA-aware** (`distributed/kv_transfer/kv_connector/`,
-  treats MLA as replicated blocks, moves them byte-level — so `nvfp4_ds_mla` packing may not matter).
-- But **LMCache and FlexKV are not installed** in the runtime, and disk-spill of the custom
-  `nvfp4_ds_mla` sparse-MLA packed KV is **unvalidated**. Wiring + a compat test is the open work.
+lever for concurrent large coding sessions that exceed the RAM KV pool. **We wired it end-to-end**
+(baked `lmcache==0.5.3` into the image, `--kv-transfer-config '{"kv_connector":"LMCacheConnectorV1",
+"kv_role":"kv_both"}'`, `LMCACHE_LOCAL_DISK=file:///lmcache_disk`, 150 GB NVMe). Result — 3 walls
+cleared, 4th blocks it:
+1. ✅ `lmcache` installs + imports cleanly (no dep conflict with vLLM 0.21rc); `LMCacheConnectorV1`
+   registered; LMCache is MLA-aware.
+2. ✅ Passes config validation **after** dropping `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`
+   (LMCache's VMM remap would invalidate registered KV; needs expandable-segments off or the cumem
+   allocator). Overriding to `garbage_collection_threshold:0.9` clears it.
+3. ✅ **Accepts the `nvfp4_ds_mla` packed KV** — the format was never the problem.
+4. ❌ `--kv-transfer-config` **turns off the hybrid KV-cache manager (HMA)**; DeepSeek-V4 is hybrid-SWA
+   + sparse-MLA, and the DSpark verify batch (`num_tokens = seqs × (k+1)`, e.g. 36) then mis-routes:
+   `sparse_mla_sm120_decode_dsv4: Check failed num_tokens>64 (36 vs 64)`. Fatal at startup.
+
+**Root cause:** `LMCacheConnectorV1` (and all offload connectors — `OffloadingConnector`,
+`FlexKVConnectorV1`, `SimpleCPUOffloadConnector`) do **not** implement `SupportsHMA`, so vLLM disables
+the hybrid KV manager, which the DeepSeek-V4 sparse-MLA sm120 decode path requires (it also carries the
+DSpark k=5 verify). **The disk-spill blocker is HMA support in the connector, not the NVFP4 KV format.**
+Fixes: land `SupportsHMA` on `LMCacheConnectorV1`, or run without DSpark/sparse-MLA (defeats the purpose).
 
 ## 8. Minor
 - `fastsafetensors` (0.3.2) is present but the recipe uses `--load-format safetensors`; could

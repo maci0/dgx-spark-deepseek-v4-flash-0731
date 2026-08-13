@@ -23,6 +23,8 @@ Every row below was hit and fixed on real 2× GB10. Verbatim errors + deeper dia
 | `assert kv_cache_dtype.startswith("fp8") ... got nvfp4_ds_mla` | eugr resolver blocks NVFP4 KV for DeepSeek-V4 | Use tonyd2wild's image (has the DeepSeek NVFP4-KV writer); eugr can't do it (UPSTREAM_GAPS #1). |
 | `setStorage ... out of bounds` (512-vs-576) at profiling | eugr's stock 432-byte NVFP4 writer can't pad to the DSA sparse-indexer page | Not patchable client-side — needs the 584-byte padded DeepSeek writer (tonyd2wild). |
 | NVFP4 **weight** model won't serve (swiglu-clamp / cutlass-eager / `block_tables`) | NVFP4 *weight* MoE path broken on sm_121 for DeepSeek-V4 | Use **FP8 weights** + NVFP4 **KV**. NVFP4 weights give no memory benefit anyway. |
+| LMCache: `LMCacheConnectorV1 incompatible with PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` | LMCache's VMM allocator would remap registered KV pages | Set `PYTORCH_CUDA_ALLOC_CONF=garbage_collection_threshold:0.9` (drop expandable_segments) or enable the cumem allocator. |
+| LMCache: `sparse_mla_sm120_decode_dsv4: num_tokens>64 (36 vs 64)` at startup | `--kv-transfer-config` disables the hybrid KV manager (HMA); the DeepSeek-V4 sparse-MLA + DSpark verify (36 = seqs×(k+1)) then mis-routes | **No fix** without `SupportsHMA` on the connector. LMCache/FlexKV/Offloading all lack it → disk KV-offload is blocked with DSpark+sparse-MLA. See UPSTREAM_GAPS #7. |
 
 ## Output quality / client
 
