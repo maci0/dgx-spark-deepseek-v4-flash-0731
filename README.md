@@ -9,6 +9,22 @@ Scope is intentionally narrow: **this one checkpoint, this one hardware**. Not a
 
 - **[TEST_LOG.md](TEST_LOG.md)** — the full quant × framework × image sweep, every result, verbatim errors.
 - **[UPSTREAM_GAPS.md](UPSTREAM_GAPS.md)** — what's still broken/missing upstream, filed for maintainers.
+- **[CLIENT_INTEGRATION.md](CLIENT_INTEGRATION.md)** — OpenAI-compat harness setup (Kimi Code, the `reasoning` field gotcha).
+- **[MODEL_VARIANTS.md](MODEL_VARIANTS.md)** — which HF checkpoints fit this setup (abliterated FP8, REAP-pruned) + what to try next.
+- **[examples/.env.dspark.example](examples/.env.dspark.example)** · **[scripts/clean-restart.sh](scripts/clean-restart.sh)** · **[scripts/bench.py](scripts/bench.py)**
+
+## Topology
+
+```
+        ┌─────────────────────────┐   200 Gb/s RoCE (CX7)   ┌─────────────────────────┐
+        │  spark1 (HEAD, rank 0)  │ ══════════════════════ │  spark2 (WORKER, rank 1)│
+        │  GB10 sm_121a, ~122 GB  │   NCCL_IB_HCA / GID 3   │  GB10 sm_121a, ~122 GB  │
+        │  fabric 10.0.1.1        │   dist init :25000      │  fabric 10.0.1.2        │
+        │  serves :8000  ◄────────┼─ clients (Kimi, curl)   │  headless               │
+        └─────────────────────────┘                         └─────────────────────────┘
+                 TP=2, --distributed-executor-backend mp --nnodes 2
+        152 GB model split ~76 GB/node · NVFP4 KV pool up to ~2.77M tokens · clock capped 2200 MHz
+```
 
 ---
 
@@ -126,6 +142,33 @@ mid-`<think>` when harnesses send `stop` sequences — a separate but related nu
   overridden per node or the cluster hangs silently at distributed init.
 
 ---
+
+## Verify + benchmark
+
+```bash
+# health + confirm 1M context
+curl -s http://HEAD_IP:8000/v1/models | python3 -c 'import sys,json;m=json.load(sys.stdin)["data"][0];print(m["id"],m.get("max_model_len"))'
+# smoke
+curl -s http://HEAD_IP:8000/v1/chat/completions -H 'Content-Type: application/json' \
+  -d '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"Say hi in 5 words."}],"max_tokens":32}'
+# concurrency benchmark (per-stream + aggregate at c1/c2/c3/c6)
+BASE=http://HEAD_IP:8000/v1 uv run --with aiohttp python3 scripts/bench.py 1 2 3 6
+```
+
+`scripts/bench.py` defaults to a coding prompt (high DSpark acceptance). Change `PROMPT=` to see the
+content-driven spread — the same server does ~83 tok/s on counting and ~64 on a BST implementation.
+
+## Versions pinned (what these numbers were measured on)
+
+| component | value |
+|---|---|
+| Hardware | 2× NVIDIA DGX Spark (GB10, sm_121a), 200 Gb/s CX7 RoCE, TP=2 |
+| Runtime image | `vllm-dspark-runtime:dspark-nvfp4-stage-c` (tonyd2wild), base `ghcr.io/bjk110/vllm-spark:unholy-fusion-prod-ready` |
+| vLLM | `0.21.1rc1.dev339+g1967a5627bc3` |
+| Throughput image | `eugr/spark-vllm-b12x:latest` (vLLM main + B12X sm_121 kernels) |
+| Model | `deepseek-ai/DeepSeek-V4-Flash-0731` / `apetersson/...-Abliterated-FP8` (FP8 e4m3, 256 experts, 167 GB) |
+| KV / spec | `nvfp4_ds_mla` KV · DSpark k=5 (locked; multiple of n_predict=5) |
+| Measured | 2026-08 |
 
 ## Credits
 
