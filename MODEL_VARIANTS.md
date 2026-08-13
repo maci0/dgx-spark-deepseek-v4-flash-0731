@@ -24,7 +24,7 @@ all ~156-168GB). Only **FP8 weights** get the full B12X/DSpark path. Abliteratio
 ### Abliterated FP8 (drop-in; same size/perf, different alignment)
 | checkpoint | experts | size | notes |
 |---|---|---|---|
-| **`squanchyzx/DeepSeek-V4-Flash-0731-HERETIC-Abliterated-FP8`** | 256 | 167 GB | fp8 e4m3, DSpark in config. **Direct drop-in** — HERETIC abliteration (heretic = automated refusal-direction ablation). Try next if you want a different/stronger abliteration than apetersson. Expect identical speed. |
+| **[`squanchyzx/…HERETIC-Abliterated-FP8`](https://huggingface.co/squanchyzx/DeepSeek-V4-Flash-0731-HERETIC-Abliterated-FP8)** | 256 | 167 GB | fp8 e4m3, DSpark in config. **Direct drop-in** — HERETIC abliteration (heretic = automated refusal-direction ablation). Try next if you want a different/stronger abliteration than apetersson. Expect identical speed. |
 | `pocharlies/...-uncensored-abliterated-refusal-directions` | — | — | listed 2026-08-13; config not resolvable yet (no config.json) — watch. |
 
 ### REAP-pruned FP8 (the real perf / capacity lever)
@@ -35,9 +35,9 @@ untested here. Ranked balanced→aggressive:
 
 | checkpoint | experts | size | freed vs 167GB | risk |
 |---|---|---|---|---|
-| `WaveCut/DeepSeek-V4-Flash-0731-REAM160-180B` | 160 | **100.8 GB** | ~66 GB | moderate — best balance |
-| `WaveCut/DeepSeek-V4-Flash-0731-REAM128-146B-exp` | 128 | ~ | more | higher |
-| `WaveCut/DeepSeek-V4-Flash-0731-REAM96-111B-exp` | 96 | **64 GB** | ~103 GB | aggressive — biggest capacity/speed, most quality risk |
+| [`WaveCut/…REAM160-180B`](https://huggingface.co/WaveCut/DeepSeek-V4-Flash-0731-REAM160-180B) | 160 | **100.8 GB** | ~66 GB | moderate — best balance |
+| [`WaveCut/…REAM128-146B-exp`](https://huggingface.co/WaveCut/DeepSeek-V4-Flash-0731-REAM128-146B-exp) | 128 | ~ | more | higher |
+| [`WaveCut/…REAM96-111B-exp`](https://huggingface.co/WaveCut/DeepSeek-V4-Flash-0731-REAM96-111B-exp) | 96 | **64 GB** | ~103 GB | aggressive — biggest capacity/speed, most quality risk |
 
 > **REAM160-180B** is the one to A/B first: ~66 GB freed roughly **doubles the KV pool again** on top
 > of the util win, and fewer experts should speed decode — if quality + DSpark acceptance hold. Measure
