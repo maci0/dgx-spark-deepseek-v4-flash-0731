@@ -16,14 +16,31 @@ not in eugr-b12x — it needs the overlay + stage-a/b/c patches on the bjk110 ba
 - tonyd2wild's Stage-C fixes it with a **584-byte padded DeepSeek-V4 NVFP4 envelope** + a real
   padded-NVFP4 writer. **Upstream should land the DeepSeek-V4 padded-NVFP4 KV writer** so 1M works on
   stock/eugr without the custom image.
+- **Status @ vLLM v0.27.1 (checked in source):** STILL the gap, and now *actively rejected*. There is
+  **no `nvfp4_ds_mla`** dtype (`config/cache.py` lists `fp8_ds_mla` + a generic `nvfp4`, not the packed
+  DS-MLA nvfp4), and a new validator **`VllmConfig.validate_nvfp4_kv_cache_with_mla` (config/vllm.py)
+  raises** `"nvfp4 KV cache is not supported with MLA ... use 'fp8' or 'auto'"`. So 0.27.1 caps
+  DeepSeek-V4 at **fp8 KV (~512K ctx)**; the 1M nvfp4 path remains tonyd2wild-only.
 
-## 2. vLLM: SM12x sparse-MLA decode + DSpark not in stock
-- PR **#41834** (SM12x sparse-MLA decode + DSpark) is **unmerged into main** → stock `vllm-openai`
-  (latest/nightly) and NGC run this model **no-spec, eager only** (`sparse_mla_sm120: num_tokens>64`
-  assert on spec). ~+38% slower single-stream, no cudagraphs.
-- DSpark PR **#46995** merged (helps garble/concurrency) but is **insufficient** — v0.24 still can't
-  boot the 1M/NVFP4 path without re-porting the GB10/SM120 survival overlays and the `nvfp4_ds_mla`
-  writer above. Ref: tonyd2wild `UPSTREAM_V024_STATUS.md`.
+## 2. vLLM: SM12x sparse-MLA decode + DSpark — MERGED as of v0.27.1
+**Was** unmerged (PR #41834 sparse-MLA + DSpark; the model ran no-spec/eager-only on stock ≤0.24).
+**Now, in v0.27.1 source, the whole spec+sparse stack is upstream** (verified by grep):
+- **DeepSeek-V4 model** lives at `vllm/models/deepseek_v4/` (new plugin-model dir alongside
+  `deepseek_v32`, `kimi_k3`, `minimax_m3`): registry maps `DeepseekV4ForCausalLM`,
+  `DSparkDeepseekV4ForCausalLM` (draft), and `DeepSeekV4MTP`.
+- **DSpark / DFlash / MTP** speculators: `vllm/v1/worker/gpu/spec_decode/{dspark,dflash}/`.
+- **SM120 sparse-MLA decode**: `vllm/v1/attention/backends/mla/flashinfer_mla_sparse_sm120.py`
+  (`FLASHINFER_MLA_SPARSE_SM120`), which **requires the packed `fp8_ds_mla` KV** and FlashInfer's
+  `trtllm_batch_decode_sparse_mla_dsv4` (gated by `has_flashinfer_sparse_mla_sm120()`).
+- Plus deepseek_v4 `parser/renderer/tokenizer/transformers_utils config`.
+
+**What this means:** stock **v0.27.1 can serve DeepSeek-V4-Flash + DSpark + sparse-MLA on sm120 with
+fp8 KV, no tonyd2wild patches** — i.e. the ≤512K path is (near) upstream. The **only** remaining custom
+piece is the `nvfp4_ds_mla` writer for 1M (gap #1). **Two GB10 caveats to verify before trusting it on
+sm_121a:** (a) FlashInfer must ship `sparse_mla_sm120` / `trtllm_batch_decode_sparse_mla_dsv4` **built
+for sm_121a** (stock flashinfer wheels historically target sm100/sm120 datacenter/desktop, not GB10 —
+this is what eugr's sparkinfer/B12X supplied); (b) the MoE + attention kernels must have sm_121a SASS.
+Current live serve still runs the tonyd2wild image (vLLM `0.21.1rc1`) for the 1M nvfp4 path.
 
 ## 3. vLLM: NVFP4 *weight* MoE path broken on sm_121 for DeepSeek-V4
 - `flashinfer_b12x` MoE: swiglu-clamp gate admits only `SWIGLUOAI_UNINTERLEAVE`; DeepSeek's plain
