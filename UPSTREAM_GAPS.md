@@ -72,6 +72,20 @@ killed by orchestration after rank0's watchdog. **Not the fabric** (vLLM TP2 run
 same RoCE). Cookbook only ever verified single-node (TP4 on 1×GB300, or TP2 on 1×RTX-PRO-6000 with
 NVLink). The 2-node-1-GPU-each layout is broken. Model is 152GB so single-node isn't an option.
 
+**Update — SGLang 0.5.17 (lmsysorg/sglang:latest, built 2026-08-07) fixes the BOOT collective, but hangs
+at DECODE.** Re-tested on 2× GB10 (fp8_e4m3 KV, 524K ctx, `--tp-size 2 --nnodes 2`, same RoCE env):
+- ✅ **Boots fully now** — the forward-profiling allreduce that used to drop at `PG ID 2` **succeeds**:
+  builds a **2,043,648-token** KV pool, `max_running_requests=256`, captures decode cudagraphs (bs up to
+  256), reaches `Application startup complete` / `The server is fired up and ready`, health 200, and a
+  trivial completion ("hi") returns correctly. So the boot-time cross-node NCCL bug is **gone** in 0.5.17.
+- ❌ **Real generation hangs the worker.** On a normal coding prompt (128-256 tokens) the **TP1 (worker)
+  scheduler stalls and hits `Scheduler watchdog timeout (300s)`** → worker exits → head follows with a
+  `TimeoutError` and `kill_process_tree`. The instability didn't disappear, it **moved from boot to
+  decode** — a cross-node decode-time stall. Still **not production-viable** on this 2-node-1-GPU layout.
+- Note: 0.5.17 uses `DeepseekV4AttnBackend` (CUDA) + FlashInfer autotune on `sm121`, and only
+  `lmsysorg/sglang:latest` has DeepSeek-V4 at all (nvcr `sglang:26.03`=0.5.9 and `v0.5.10.post1` do not).
+- **Verdict:** meaningful progress (boot fixed), but **vLLM remains the only viable serve** on 2× GB10.
+
 ## 6. vLLM: multi-node `mp` executor restart wedge
 - `restart: unless-stopped` + engine deaths that **exit 0** + a **capture-time cross-node collective
   wedge** → docker auto-restarts straight into a deadlock (GPU idle at KV-alloc, no error). A boot loop.

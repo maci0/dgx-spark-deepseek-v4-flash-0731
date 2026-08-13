@@ -119,9 +119,10 @@ mid-`<think>` when harnesses send `stop` sequences — a separate but related nu
 
 ## What does NOT work here (short list; full detail + errors in TEST_LOG)
 
-- **SGLang:** loads DeepSeek-V4 on sm_121 but **cross-node TP2 NCCL collective #2 always drops** —
-  every transport (RDMA/TCP), every knob. Not the fabric (vLLM runs cross-node fine). Model is 152GB
-  so single-node isn't an option. Blocked.
+- **SGLang:** older builds dropped the cross-node collective at boot. **0.5.17 (Aug 2026) now boots the
+  2-node path** (2.04M KV pool, server ready, trivial gen works) — but **real generation hangs the worker**
+  (`Scheduler watchdog timeout 300s` on TP1 → death). The instability moved from boot to decode; still
+  not viable. Only `lmsysorg/sglang:latest` has DeepSeek-V4 at all. See UPSTREAM_GAPS #5.
 - **NVFP4 *weights* on vLLM (neko/sakamakismile/RedHatAI/nvidia):** all fail — swiglu-clamp/cutlass-
   eager/`block_tables` for all-NVFP4, and compressed-tensors ≠ B12X native-FP8 kernels for RedHatAI.
   And NVFP4 weights don't even shrink the footprint (all ~156-168GB). The NVFP4 win is **KV**, not weights.
