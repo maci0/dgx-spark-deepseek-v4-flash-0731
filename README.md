@@ -12,6 +12,7 @@ Scope is intentionally narrow: **this one checkpoint, this one hardware**. Not a
 - **[CLIENT_INTEGRATION.md](CLIENT_INTEGRATION.md)** — OpenAI-compat harness setup (Kimi Code, the `reasoning` field gotcha).
 - **[MODEL_VARIANTS.md](MODEL_VARIANTS.md)** — which HF checkpoints fit this setup (abliterated FP8, REAP-pruned) + what to try next.
 - **[TUNING.md](TUNING.md)** — the util→KV-pool lever (and the 0.85 startup cliff), single-stream ceiling, content-driven DSpark.
+- **[TROUBLESHOOTING.md](TROUBLESHOOTING.md)** — symptom → cause → fix table for every failure hit here.
 - **[examples/.env.dspark.example](examples/.env.dspark.example)** · **[scripts/clean-restart.sh](scripts/clean-restart.sh)** · **[scripts/bench.py](scripts/bench.py)**
 
 ## Topology
