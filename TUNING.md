@@ -52,18 +52,19 @@ on counting and ~64 on a BST implementation. Any single number without the workl
 Coding is predictable → speculation flies. This is why an agentic coding client is the best-case
 workload for this serve.
 
-## Concurrency (your 2-3 chat load), util 0.78 baseline, coding prompt
+## Concurrency (your 2-3 chat load), coding prompt
 
-| concurrency | per-stream tok/s | aggregate |
+| concurrency | per-stream tok/s (util 0.78) | per-stream tok/s (util 0.82, settled) |
 |---|---|---|
-| c1 | 41.2 | 41 |
-| c2 | 39.5 | 79 |
-| **c3** | **37.1** | 111 |
-| c6 | 14.8 | 89 |
+| c1 | 41.2 | 53.7 |
+| c2 | 39.5 | 44.5 |
+| **c3** | **37.1** | **40.5** |
+| c6 | 14.8 | 25.9 |
 
-Per-stream barely drops c1→c3 (41→37): your 2-3 concurrent coding chats each stay near single-stream
-speed. It only collapses once you fill the batch (c6 with seqs 6). Re-measure at util 0.82 — speed is
-unchanged by util, only capacity grows.
+Per-stream barely drops c1→c3: your 2-3 concurrent coding chats each stay near single-stream speed.
+util changes KV pool size, not decode speed — the spread between the two columns is run-to-run
+acceptance variance (content-driven), not a util effect. It only collapses once you fill the batch
+(c6 with seqs 6).
 
 ## Load time (subsequent restarts)
 
