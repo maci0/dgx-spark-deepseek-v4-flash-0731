@@ -127,6 +127,13 @@ mid-`<think>` when harnesses send `stop` sequences — a separate but related nu
   And NVFP4 weights don't even shrink the footprint (all ~156-168GB). The NVFP4 win is **KV**, not weights.
 - **Stock vLLM images (latest/nightly/NGC):** run no-spec eager only (PR #41834 unmerged), ~+38% slower.
 - **NVFP4 KV on eugr-b12x:** architecturally incomplete for DeepSeek-V4 (GLM-only writer; see gaps).
+- **TokenSpeed (LightSeek) engine:** **builds + boots on GB10** (strip the Kimi-K3 `attn_res` tcgen05
+  kernel from setup.py → compiles for `12.1a`; runs portable `--attention-backend triton --moe-backend
+  flashinfer_cutlass`; clears distributed init + MoE-select on 2× GB10). But it **wedges at weight-load**:
+  the loader puts the ~80 GB/node skeleton on the GPU then reads 156 GB of shards, and on GB10's shared
+  122 GB the GPU skeleton + shard page cache collide (~160 GB) → OOM/hard-reboot. Fixing it needs
+  root-level page-cache control (`drop_caches` during load); util/cgroup/watchdog levers don't bound it.
+  tcgen05 is only the Kimi/MiniMax kernels, **not** DeepSeek-V4. See UPSTREAM_GAPS #9.
 
 ---
 

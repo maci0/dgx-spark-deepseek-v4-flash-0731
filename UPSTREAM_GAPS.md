@@ -84,6 +84,56 @@ the hybrid KV manager, which the DeepSeek-V4 sparse-MLA sm120 decode path requir
 DSpark k=5 verify). **The disk-spill blocker is HMA support in the connector, not the NVFP4 KV format.**
 Fixes: land `SupportsHMA` on `LMCacheConnectorV1`, or run without DSpark/sparse-MLA (defeats the purpose).
 
+## 9. TokenSpeed (LightSeek) engine — builds + runs on GB10, blocked at weight-load by UMA page-cache OOM
+TokenSpeed ships a `deepseek_v4_dspark` model + a DeepSeek-V4-Flash recipe (4×B200 SM100). We got it
+**building and booting on 2× GB10** with portable backends; the wall is memory, not the ISA. Full trace:
+
+**tcgen05 is a red herring for DeepSeek-V4.** The initial build fails at ptxas —
+`attn_res_fwd_tma.compute_121a.ptx: Instruction 'tcgen05.st/.ld' not supported on .target 'sm_121a'`
+(`tcgen05` = 5th-gen Tensor Memory ISA, **SM100/SM103 datacenter-Blackwell only**; GB10 `sm_121a` has no
+TMEM). But `attn_res_fwd_tma.cu` is the **Kimi-K3/KDA** kernel, imported only by `kimi_k3.py` — **not on
+the DeepSeek-V4 path**. `tokenspeed-mla` (the tcgen05 CuTe MLA) is imported by **nobody**. Deleting the
+`attn_res` entry from `tokenspeed-kernel/python/setup.py` → the kernel package **builds clean for
+`CUDA_ARCH_LIST="12.1a"`** (all of `deepseek_v4_attention.cu`, `deepseek_v4_topk.cu`, trtllm comms, etc.).
+
+**Portable backends exist and are selected.** DeepSeek-V4 attention registers a **`triton_dsa_decode` +
+`triton_dsa_prefill`** path with `CapabilityRequirement(vendors={nvidia,amd})` — **no min-arch gate** →
+runs on sm_121a (Triton JITs). MoE has **`flashinfer_cutlass_fp8_moe_apply`** (`weight_dtype: fp8`,
+`fp8_scale_block_shape:(128,128)`, **min_arch 9.0** → GB10 qualifies; the `flashinfer_trtllm_fp8` variant
+is min_arch 10.0 = sm100-only). Serve flags: `--attention-backend triton --moe-backend flashinfer_cutlass
+--kv-cache-dtype fp8_e4m3`. The B200 fast path (`tokenspeed-flashmla` DSA + `tokenspeed-deepgemm` mega_moe)
+is **not shipped in the image and not needed** — those are the tcgen05/sm100 kernels. **DSpark drafter has
+no hard sm100 import** (shares the main attention backend).
+
+**What actually works on GB10 (verified):** image builds; `import tokenspeed` + a Triton kernel compile +
+`deepseek_v4_dspark` module all succeed on `CAP (12,1) NVIDIA GB10`; 2-node launch **clears distributed
+init with no NCCL wedge** (unlike SGLang, gap #5 — `trtllm one-shot all-reduce unavailable → NCCL
+fallback`, fine); **clears MoE kernel selection** (`tp=2 ep=1 dp=1`, flashinfer_cutlass).
+
+**The blocker — weight-load OOM on unified memory.** `DefaultModelLoader` allocates the full ~80 GB/node
+model skeleton **on the GPU** (`with torch.device("cuda")`, off-book to cgroup on GB10), then reads the
+156 GB of fp8 safetensors shards. On a discrete GPU the shard bytes land in host page cache separate from
+VRAM; on GB10's **shared 122 GB** the 80 GB GPU skeleton + up to 80 GB of shard page cache coexist in the
+*same* pool → **~160 GB attempted → the node wedges** (sshd starves during swap-thrash; hard-reboot to
+recover). This is arch-agnostic to the kernels — purely a UMA memory-management problem. Levers tried:
+- `--disable-weight-loader-prefetch-checkpoints` (default prefetches `min(80 GiB, 25% host RAM)` ahead) —
+  necessary but **insufficient**: demand-faulted reads still cache the shards.
+- Docker `--memory` cgroup cap — **ineffective**: the GPU skeleton is off-book, and the bind-mounted
+  shard page cache is charged to the **root** cgroup (files already resident from prior loads), not the
+  container. Neither a low (32 GB) nor loose (100 GB) cap bounded the real memory.
+- A host watchdog on `MemAvailable` — **too slow**: it starves (can't fork) before it can `docker kill`.
+- `--gpu-memory-utilization` — **wrong axis**: KV is sized from free-mem *after* weights load, so util
+  only sets the post-load KV/reserve split, not the load-time peak.
+
+**The clean fix needs root** (which the loader/engine can't reach on its own): a `drop_caches` loop during
+load (`sync; echo 1 > /proc/sys/vm/drop_caches`) to keep the shard page cache from stacking on the GPU
+skeleton, or `O_DIRECT`/`madvise(DONTNEED)` reads in the loader (not exposed). **Upstream fix for UMA
+GPUs (GB10/GH200-class):** either page-cache-bypass reads in `safetensors_weights_iterator`, or a
+"unified-memory" load mode that streams shard→GPU while evicting each shard's pages. Until then TokenSpeed
+is **build- and boot-OK on GB10 but not servable without root-level page-cache control**; stick with the
+vLLM tonyd2wild runtime (which loads the same 156 GB fine at util 0.82). Kimi-K3 / MiniMax paths remain
+genuinely tcgen05/sm100-only.
+
 ## 8. Minor
 - `fastsafetensors` (0.3.2) is present but the recipe uses `--load-format safetensors`; could
   parallelize cold loads. Warm loads are already fast (page cache; ~36s weight read).
