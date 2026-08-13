@@ -39,9 +39,18 @@ untested here. Ranked balanced→aggressive:
 | [`WaveCut/…REAM128-146B-exp`](https://huggingface.co/WaveCut/DeepSeek-V4-Flash-0731-REAM128-146B-exp) | 128 | ~ | more | higher |
 | [`WaveCut/…REAM96-111B-exp`](https://huggingface.co/WaveCut/DeepSeek-V4-Flash-0731-REAM96-111B-exp) | 96 | **64 GB** | ~103 GB | aggressive — biggest capacity/speed, most quality risk |
 
-> **REAM160-180B** is the one to A/B first: ~66 GB freed roughly **doubles the KV pool again** on top
-> of the util win, and fewer experts should speed decode — if quality + DSpark acceptance hold. Measure
-> both tok/s **and** answer quality on real coding tasks before adopting.
+> **REAM160-180B** is the one to A/B first on the **2-node (TP2)** setup: ~66 GB freed roughly
+> **doubles the KV pool again** on top of the util win, and fewer experts should speed decode — if
+> quality + DSpark acceptance hold. Measure both tok/s **and** answer quality on real coding tasks.
+
+**Single-Spark (1× GB10) option.** GB10 has ~122 GB usable; weights must fit alongside KV/activations:
+- **REAM96-111B (64 GB) fits one node comfortably** — util 0.85 → ~40 GB KV → ~4M-token pool → full 1M
+  ctx + 2-3 concurrent sessions on a single GB10. Big win: **no cross-node NCCL** (kills the entire
+  restart-hang / distributed-init failure class) and **frees the second node**. Cost: ~half the decode
+  compute (1 GPU) + aggressive-pruning quality risk (96/256 experts — verify).
+- **REAM160-180B (100.8 GB) does NOT fit one node well** — ~3 GB left for KV → ~256K ctx, no headroom,
+  high-util catch-22. Use TP2 for it.
+- The full 167 GB model and REAM128-146B need TP2 (don't fit one node).
 
 ### Other FP8 with DSpark (not abliterated)
 | checkpoint | notes |

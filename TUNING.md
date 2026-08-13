@@ -13,7 +13,7 @@ that matters for **concurrent large coding sessions** (200-500K tokens each).
 |------|-----------------:|-----------------:|---------|---------|
 | 0.78 | 1,181,262 | 1.13× | fast (~3 min) | too tight for 3 large sessions |
 | 0.80 | ~1.65–1.87M | ~1.6–1.8× | fast | good |
-| **0.82** | **~2M (measuring)** | **~2×** | **fast** | **recommended — big pool, fast startup** |
+| **0.82** | **2,137,521** | **2.04×** | **fast (~4 min)** | **recommended — big pool, fast startup** |
 | 0.85 | 2,769,487 | 2.64× | **~11+ min, stalls** | ❌ pool quantization/graph setup pathologically slow at startup |
 
 **The 0.85 cliff:** the NVFP4 KV pool at 2.77M tokens takes 11+ min to quantize/capture at startup
