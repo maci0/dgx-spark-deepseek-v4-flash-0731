@@ -63,7 +63,7 @@ Key serve flags (via their `docker-compose.dspark.yml` + `.env.dspark`):
 ```
 --kv-cache-dtype nvfp4_ds_mla --block-size 256
 --max-model-len 1048576
---max-num-seqs 6
+--max-num-seqs 32                      # << aggregate-throughput lever: 6→32 lifts peak 159→421 tok/s, free at low concurrency (48 hangs on 2-node)
 --max-num-batched-tokens 8192
 --gpu-memory-utilization 0.85          # << see "Tuning" — biggest lever for concurrent large sessions
 --speculative-config '{"method":"dspark","num_speculative_tokens":5,"draft_sample_method":"probabilistic"}'

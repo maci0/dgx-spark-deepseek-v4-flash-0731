@@ -26,6 +26,27 @@ each fit; sessions approaching a full 1M each will contend past ~2 concurrent (t
 + `gpu-memory-utilization` ceiling — the only way past it on this hardware is expert-pruned weights,
 see MODEL_VARIANTS REAP, or LMCache disk-spill, see UPSTREAM_GAPS #7).
 
+## `max-num-seqs` → aggregate throughput (the real throughput lever, measured 2026-08)
+
+The recipe ships `max-num-seqs 6`, tuned for a few large coding sessions. That value **caps aggregate
+throughput** — the batch fills at c6 and queues beyond it. Raising it (util **0.82**, nvfp4 1M KV,
+DSpark, coding prompt) scales aggregate ~linearly and **costs nothing at low concurrency** (single-stream
+c1 is unchanged, ~53-62 tok/s):
+
+| max-num-seqs | peak aggregate | at | single-stream (c1) | boots? |
+|---|---:|---|---:|---|
+| 6 | 159 tok/s | c6 | ~55 | ✅ |
+| 16 | 293 tok/s | c16 | ~58 | ✅ |
+| **32** | **421 tok/s** | **c32** | ~53 | ✅ (cudagraph capture ~55s, ~7 min warm start) |
+| 48 | — | — | — | ❌ **hangs** at API-server handoff (`shm_broadcast` 60s stall; 48-seq cudagraph capture wedges the multi-node frontend) |
+
+**`max-num-seqs 32` is the recommended setting** and strictly dominates 6: identical behavior when only
+2-3 requests are active (KV is allocated per-*active*-request from the shared pool, not pre-reserved per
+slot), but a **2.6× higher aggregate ceiling (159 → 421 tok/s)** under load. This **beats the old FP8
+throughput-mode number (326 tok/s @ c48 on eugr-b12x)** while keeping nvfp4 **1M context + DSpark + full
+per-stream speed** — so there is no longer a reason to switch to the FP8/no-spec image just for aggregate
+throughput. **48 is the boot ceiling** on this 2× GB10 multi-node setup (frontend hang), so stay at 32.
+
 ## Single-stream decode: already at the ceiling (don't bother tuning)
 
 The recipe author's exhaustive sweep + our re-check: **zero config wins.** Proven negatives — do not
@@ -35,7 +56,7 @@ re-test:
 |---|---|
 | `num_speculative_tokens` (k) | **locked at 5** — 7 rejected at boot (must be multiple of n_predict=5), 10 crashes at runtime |
 | `max-model-len` 1M → 200K | no gain |
-| `max-num-seqs` 6 → 2 | no gain |
+| `max-num-seqs` 6 → 2 | no gain *for single-stream* (but it IS the aggregate-throughput lever — see next section) |
 | `--max-cudagraph-capture-size 36` | no gain |
 | util (for *speed*) | no effect (only changes pool size) |
 
@@ -81,7 +102,7 @@ VRAM does not survive process exit (CUDA context destroyed) — every restart re
 
 ```
 --gpu-memory-utilization 0.82        # big KV pool, fast startup (not 0.85 — startup cliff)
---max-num-seqs 6                     # >=3 for your load; higher doesn't help single/low-c
+--max-num-seqs 32                    # aggregate-throughput lever: 6→32 = 159→421 tok/s peak, free at low-c (48 hangs)
 --kv-cache-dtype nvfp4_ds_mla        # the 1M enabler
 --max-model-len 1048576
 --speculative-config '{"method":"dspark","num_speculative_tokens":5,"draft_sample_method":"probabilistic"}'
