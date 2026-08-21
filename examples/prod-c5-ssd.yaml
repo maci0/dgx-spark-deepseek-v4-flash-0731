@@ -164,7 +164,6 @@ volumes:
   - /home/maci/kvspill:/kvspill
 
 env:
-  PYTHONPATH: "/cache/huggingface/pypatch"
   # Line-buffer python output even when redirected to the serve log —
   # without this, a hard crash during startup loses the buffered output
   # and the failure log is empty.

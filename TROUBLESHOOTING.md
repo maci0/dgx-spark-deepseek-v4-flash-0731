@@ -12,7 +12,7 @@ Every row below was hit and fixed on real 2× GB10. Verbatim errors + deeper dia
 | Worker dies with `zmq.error.ZMQError: Cannot assign requested address (tcp://<ip>:...)` | Image bakes `VLLM_HOST_IP` = the *author's* address; on your node that IP isn't local | Set `-e VLLM_HOST_IP=<this node's fabric IP>` **per node** (head=10.0.1.1, worker=10.0.1.2). |
 | Both nodes come up as **rank 1**, cluster hangs at init | Baked `CMD` carries a fixed `--node-rank`; launcher inherited the wrong identity | Pass `--node-rank`/`--headless` explicitly per node; don't trust baked values. |
 | `ProcessGroupGloo ... gloo/transport/tcp/device.cc` at rank init | `GLOO_SOCKET_IFNAME`/`TP_SOCKET_IFNAME` baked to a NIC that doesn't exist on your host | Default both to `NCCL_SOCKET_IFNAME` (one value covers all three). |
-| Startup **stalls ~11+ min** at "kv cache quantization", GPU 96%, `shm_broadcast` repeating | `gpu-memory-utilization` too high (0.85 → 2.77M-token NVFP4 pool is pathologically slow to quantize/capture) | Use **util 0.82** (2.14M pool, fast startup). See [TUNING.md](TUNING.md). |
+| Startup **stalls ~11+ min** at "kv cache quantization", GPU 96%, `shm_broadcast` repeating | `gpu-memory-utilization` too high (0.85 → 2.77M-token NVFP4 pool is pathologically slow to quantize/capture) | Use **util 0.82** (2.14M pool allocated, faster startup, though NVFP4 pools still fail later in warmup). See [TUNING.md](TUNING.md). |
 | Another container (`llama-server`/gpustack) silently steals GB10 memory | Auto-restarted on boot, contends for shared unified memory | Stop it before serving: `docker stop $(docker ps -q --filter name=llama) gpustack-worker`. |
 
 ### systemd `RemoveIPC` silently kills the worker rank (2026-08-20)

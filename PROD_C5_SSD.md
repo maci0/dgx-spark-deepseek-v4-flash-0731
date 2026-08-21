@@ -1,7 +1,13 @@
-# Production config — 5 concurrent clients, ~2.2-2.6M KV, SSD KV offload
+# Production config: 5 concurrent clients, SSD KV offload (NVFP4 pool NOT yet serving)
 
 Target: a **production** serve (not a leaderboard run) for ~5 concurrent clients with the
 largest practical KV pool and KV spill to NVMe, using as few non-stock knobs as possible.
+
+**Status: not shipped.** The SSD offload path and the parameter set below are settled, but the
+NVFP4 KV pool that makes ~2.2M tokens possible has never survived startup (§4). For a config
+that actually serves today, use
+[`examples/deepseek-v4-flash-0731-dspark-arena-threshold.yaml`](examples/deepseek-v4-flash-0731-dspark-arena-threshold.yaml)
+(fp8, 1.45M tokens, 162.5 tok/s aggregate at c5).
 
 Recipe: [`examples/prod-c5-ssd.yaml`](examples/prod-c5-ssd.yaml). Serves on **port 8890**
 so it never collides with the arena-threshold serve on 8888.
@@ -23,12 +29,19 @@ so it never collides with the arena-threshold serve on 8888.
 | `cpu_bytes_to_use` | **2 GiB** | staging buffer only. GB10 is unified memory, so every GiB here is a GiB the GPU KV pool cannot use — 32 GiB OOM-killed the worker |
 | `PYTORCH_CUDA_ALLOC_CONF` | `garbage_collection_threshold:0.9` | mandatory with any offload connector — see §2 |
 
-Measured KV pools (abliterated model, `max_num_seqs 6`, k=5):
+KV pools **allocated** (abliterated model, `max_num_seqs 6`, k=5):
 
-| util | KV pool | tokens | concurrency @ 1M ctx | startup |
-|---|---:|---:|---:|---|
-| 0.82 | 17.1 GiB | **2,233,845** | 2.13× | ~10 min |
-| 0.84 | 19.9 GiB | **2,575,356** | 2.46× | 25+ min, hits the race in §4 |
+| util | KV pool | tokens | concurrency @ 1M ctx | startup | reached serving? |
+|---|---:|---:|---:|---|---|
+| 0.82 | 17.1 GiB | 2,233,845 | 2.13× | ~10 min | **no**, worker dies in warmup (§4) |
+| 0.84 | 19.9 GiB | 2,575,356 | 2.46× | 25+ min | **no**, same, plus the §4 race |
+
+> **Read these numbers correctly.** They are the pool size vLLM *reports at allocation*, taken
+> from a boot that then died during `Warming up DeepSeek V4 sparse MLA attention`. **No NVFP4
+> configuration has ever reached a serving state on this pair.** The largest KV pool that has
+> actually served traffic is **1,458,744 tokens** (fp8, arena-threshold recipe); every log here
+> that reaches a healthy `/health` shows at most 1.46M. Treat 2.2M/2.6M as *evidence NVFP4
+> allocates what the arithmetic predicts*, not as a shipped capability. §4 is the open blocker.
 
 ---
 
@@ -94,7 +107,8 @@ is all a staging buffer to NVMe needs.
 
 ## 3. Why util 0.82 and not 0.84
 
-0.84 genuinely allocates **2,575,356 tokens (2.46×)** — it meets the ~2.5M target. But NVFP4 pool
+0.84 genuinely allocates **2,575,356 tokens (2.46×)** — it meets the ~2.5M target *at allocation
+time*, though like 0.82 it never reached serving. But NVFP4 pool
 quantization at that size runs 25+ minutes, during which the §4 race reliably kills the worker.
 A production server that takes 25 minutes to restart *and* loses a coin flip on the way up is not
 production-grade, so 0.82 is the shipped default. Changing it back is one line if the capacity
@@ -109,37 +123,47 @@ ValueError: Free memory on device cuda:0 (96.75/121.69 GiB) on startup is less t
 
 ---
 
-## 4. The blocker that had to be patched
+## 4. The open blocker: worker dies during sparse-MLA warmup
 
-Every NVFP4 boot — util 0.84 **and** 0.82 — died with this on the worker node:
+Every NVFP4 boot, util 0.84 **and** 0.82, dies with this on the worker node:
 
 ```
 [Worker_TP1] Warming up DeepSeek V4 sparse MLA attention for mixed tokens=16 ...
 [multiproc_executor] Parent process exited, terminating worker queues
 ```
 
-and the head then hung forever in `shm_broadcast`.
+and the head then hangs forever in `shm_broadcast`. **This is unresolved.** The child is reporting
+that its parent (the headless `vllm serve` on the worker node) is gone; the question is why.
 
-Upstream cause, in `vllm/entrypoints/cli/serve.py::run_headless`:
+### Hypotheses tested and ruled out
 
-```python
-executor = MultiprocExecutor(vllm_config, monitor_workers=False)
-executor.start_worker_monitor(inline=True)
-return                     # parent exits the moment the monitor returns
+| Hypothesis | Test | Result |
+|---|---|---|
+| systemd `RemoveIPC` reaps the worker's POSIX semaphores at session end | `loginctl enable-linger maci` on both nodes | Ruled out. Linger is enabled and this still reproduces. (It *was* a real, separate bug: it had corrupted several earlier "b12x deadlock" conclusions.) |
+| The launcher is bound to the SSH session, so the parent dies when the session churns | Relaunched sparkrun inside a detached `screen` session | Ruled out. Reproduces identically under `screen`. |
+| `run_headless` returns early because `start_worker_monitor(inline=True)` wakes spuriously | `sitecustomize.py` replacing the inline path with a real liveness poll | **Ruled out, and the hypothesis was wrong.** The patch loaded and was confirmed active, yet the parent still exited, which proves the parent is being killed *externally* rather than returning from the monitor. Patch reverted and deleted. |
+| Kernel OOM-kills the parent during the NVFP4 quantization spike (GB10 unified memory) | `dmesg` oom-kill counters on both nodes, before and after | Ruled out. Zero kills on either node. |
+
+### What is still consistent with the evidence
+
+The parent is killed by something external that is not the OOM killer. Not yet examined: the
+container runtime's own supervision (exit of PID 1 or a healthcheck in the sparkrun-generated
+container), and whatever sparkrun does to the remote worker when the head's own startup exceeds an
+internal timeout. That is the next thing to instrument: capture the worker parent's PID and its
+exit status/signal at the moment of death, rather than inferring from the child's message.
+
+### Why compose is not the workaround
+
+The `docker-compose.dspark.yml` path in the tonyd2wild repo cannot substitute here: with this image
+it fails multi-node TP outright, with each node computing `local_world_size=2` on its single GPU:
+
+```
+AssertionError: local_world_size (2) must be less than or equal to ...
+AssertionError: DP adjusted local rank 1 is out of bounds.
 ```
 
-`start_worker_monitor(inline=True)` blocks on `multiprocessing.connection.wait(sentinels)`, whose
-return is supposed to mean "a worker died". Here it returns **while the worker is still
-initialising**, so the parent returns, exits, and SIGKILLs a healthy worker. The window scales with
-startup time, which is why short fp8 boots usually survive and long NVFP4 boots never do.
-
-Fix: `~/.cache/huggingface/pypatch/sitecustomize.py` on both nodes, wired in with
-`PYTHONPATH=/cache/huggingface/pypatch`. It replaces the inline path with a real liveness poll and
-returns only once every worker process has genuinely exited. ~30 lines, no image rebuild, no edits
-inside the container, and it no-ops if upstream changes shape.
-
-This is the **only** patch added for this config; the recipe's two pre-existing `pre_exec` blocks
-(stage-c overlay rebuild, and a `kill` shim the image lacks) are both load-bearing and stay.
+despite correct `--nnodes 2 --node-rank 0/1 --headless` argv on both sides (verified with
+`docker inspect`). Every boot that has ever served did so through sparkrun's `mp` backend.
 
 ---
 

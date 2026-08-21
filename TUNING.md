@@ -127,7 +127,7 @@ Measured warm via `/v1/completions` with `ignore_eos:true`, 128 tokens/request.
 single-stream.
 
 **Do not read this as "NVFP4 KV is worse."** The large NVFP4 pools documented above
-(2.14M @ util 0.82, 2.77M @ util 0.85) come from the **1M recipe**, which pairs
+(2.14M @ util 0.82, 2.77M @ util 0.85, allocated but not served) come from the **1M recipe**, which pairs
 NVFP4 KV with `max-num-seqs 6` and `k=5`. Spec-decode buffers scale with
 `max_num_seqs × (k+1)`, so at `max-num-seqs 12` those buffers consume the memory that
 should have become KV. The KV dtype and the seqs/k choice have to be tuned together —

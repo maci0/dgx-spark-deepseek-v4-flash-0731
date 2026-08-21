@@ -13,7 +13,7 @@ Scope is intentionally narrow: **this one checkpoint, this one hardware**. Not a
 - **[MODEL_VARIANTS.md](MODEL_VARIANTS.md)** — which HF checkpoints fit this setup (abliterated FP8, REAP-pruned) + what to try next.
 - **[TUNING.md](TUNING.md)** — the util→KV-pool lever (and the 0.85 startup cliff), single-stream ceiling, content-driven DSpark.
 - **[TROUBLESHOOTING.md](TROUBLESHOOTING.md)** — symptom → cause → fix table for every failure hit here.
-- **[PROD_C5_SSD.md](PROD_C5_SSD.md)** — production config: 5 clients, ~2.2-2.6M KV, **SSD KV offload** (works — UPSTREAM_GAPS #7 was too pessimistic), param minimization, node housekeeping.
+- **[PROD_C5_SSD.md](PROD_C5_SSD.md)** — production config: 5 clients, **SSD KV offload** (works; UPSTREAM_GAPS #7 was too pessimistic), param minimization, node housekeeping. **Not yet serving:** its NVFP4 KV pool dies in warmup.
 - **[examples/.env.dspark.example](examples/.env.dspark.example)** · **[scripts/clean-restart.sh](scripts/clean-restart.sh)** · **[scripts/bench.py](scripts/bench.py)**
 
 ## Topology
@@ -26,18 +26,18 @@ Scope is intentionally narrow: **this one checkpoint, this one hardware**. Not a
         │  serves :8000  ◄────────┼─ clients (Kimi, curl)   │  headless               │
         └─────────────────────────┘                         └─────────────────────────┘
                  TP=2, --distributed-executor-backend mp --nnodes 2
-        152 GB model split ~76 GB/node · NVFP4 KV pool up to ~2.77M tokens · clock capped 2200 MHz
+        152 GB model split ~76 GB/node · largest KV pool that has served: 1.46M tokens · clock capped 2200 MHz
 ```
 
 ---
 
-## TL;DR — three configs that work
+## TL;DR: two configs that serve, one that does not yet
 
 | Goal | Framework / image | Quant | Ctx | Spec | Measured |
 |------|-------------------|-------|-----|------|----------|
-| **Max context (1M)** | vLLM, tonyd2wild `dspark-nvfp4-stage-c` (bjk110 base) | FP8 weights + **NVFP4 KV** | **1,048,576** | DSpark k5 | ~37-41 tok/s/stream @ c1-3; KV pool up to 2.77M tokens |
+| **Max context (1M)** | vLLM, tonyd2wild `dspark-nvfp4-stage-c` (bjk110 base) | FP8 weights + **NVFP4 KV** | **1,048,576** | DSpark k5 | ~37-41 tok/s/stream @ c1-3; KV pools >1.5M allocate but have not reached serving |
 | **Max throughput (≤512K)** | vLLM, eugr `spark-vllm-b12x` | FP8 (UE8M0) | 512K | off | **~326 tok/s @ c48** |
-| **Prod, 5 clients + SSD KV spill** | vLLM, tonyd2wild `dspark-nvfp4-stage-c` | FP8 weights + **NVFP4 KV** | 1M | DSpark k=5 | **2.23M-token KV**, offload to NVMe — see [PROD_C5_SSD.md](PROD_C5_SSD.md) |
+| **Prod, 5 clients + SSD KV spill** | vLLM, tonyd2wild `dspark-nvfp4-stage-c` | FP8 weights + **NVFP4 KV** | 1M | DSpark k=5 | ⚠️ **does not serve yet**: allocates a 2.23M-token pool, then the worker dies in warmup. SSD offload itself works. See [PROD_C5_SSD.md](PROD_C5_SSD.md) |
 
 Everything else is worse or broken on this hardware — see the matrix.
 

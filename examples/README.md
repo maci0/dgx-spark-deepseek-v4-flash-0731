@@ -56,7 +56,7 @@ KV pool: **12.27 GiB = 1,448,712 tokens** (1.38× a full 1M-token context).
 
 For long concurrent coding sessions use the **1M recipe** (NVFP4 KV, `max-num-seqs 6`,
 k=5, util 0.82) — it trades startup time and low-concurrency throughput for a
-2.1M-token KV pool. See [TUNING.md](../TUNING.md).
+2.1M-token KV pool (allocated; see its serving caveat below). See [TUNING.md](../TUNING.md).
 
 Do **not** simply set `kv_cache_dtype: nvfp4_ds_mla` on *this* recipe: spec-decode
 buffers scale with `max_num_seqs × (k+1)`, so at `seqs 12` they consume the memory that
@@ -75,14 +75,18 @@ and seqs/k must be changed together.
 
 ## `prod-c5-ssd.yaml`
 
-The **production** config: ~5 concurrent clients, ~2.2-2.6M token KV pool, KV spill to NVMe.
+The **production** config: ~5 concurrent clients, KV spill to NVMe.
+
+> **Does not serve yet.** The NVFP4 KV pool allocates (2.23M tokens at util 0.82) but the worker
+> node dies during sparse-MLA warmup before the server is healthy. The SSD offload path itself is
+> verified. Use the arena-threshold recipe above for a config that actually serves.
 Serves on **port 8890** (so it can run alongside the arena config on 8888).
 
 | | |
 |---|---|
 | Image | stage-c, digest-pinned (only build with the padded `nvfp4_ds_mla` writer) |
 | Model | `drowzeys/keys-DeepSeekV4-Flash-GA-0731-Dspark-Abliterated-32-32` (gated) |
-| KV | `nvfp4_ds_mla`, util **0.82** → **2,233,845 tokens** (2.13× a 1M context) |
+| KV | `nvfp4_ds_mla`, util **0.82** → 2,233,845 tokens allocated (2.13×), *never reached serving* |
 | Spec | DSpark **k=5** |
 | Clients | `max_num_seqs 6` (5 + headroom) |
 | Offload | `OffloadingConnector` + stock `fs_python` disk tier → `/kvspill` |
@@ -99,11 +103,12 @@ curl -s localhost:8890/health           # expect 200
 
 1. **`loginctl enable-linger $USER` on both nodes** — otherwise systemd deletes the worker's POSIX
    semaphores when the SSH session ends and the head hangs forever.
-2. **The worker-monitor patch** — copy
-   [`scripts/sitecustomize-worker-monitor-fix.py`](../scripts/sitecustomize-worker-monitor-fix.py)
-   to `~/.cache/huggingface/pypatch/sitecustomize.py` on **both** nodes. Without it the headless
-   worker-node parent exits mid-warmup and SIGKILLs a healthy worker; NVFP4 boots hit this every
-   time. The recipe already sets `PYTHONPATH=/cache/huggingface/pypatch`.
+2. **A worker-node death during warmup is the open blocker** — the headless worker logs
+   `Parent process exited, terminating worker queues` mid-`Warming up DeepSeek V4 sparse MLA
+   attention` and the boot never completes. Ruled out so far: systemd `RemoveIPC` (linger is
+   enabled), SSH session teardown (reproduces under `screen`), and a `start_worker_monitor`
+   liveness patch (loaded and confirmed active; the parent still exited). Kernel OOM is *not*
+   implicated either: `dmesg` shows zero kills on both nodes. Cause still unknown.
 3. **Clear stale `/dev/shm`** before a restart — orphaned segments from crashed runs eat the same
    DRAM the GPU allocates from and will cap `gpu_memory_utilization`:
    ```bash
@@ -113,7 +118,7 @@ curl -s localhost:8890/health           # expect 200
 
 ### Tuning notes
 
-- `gpu_memory_utilization` **0.84** yields 2,575,356 tokens (2.46×) but startup runs 25+ minutes and
+- `gpu_memory_utilization` **0.84** allocates 2,575,356 tokens (2.46×) but startup runs 25+ minutes and
   becomes fragile. 0.82 is the shipped default for restart sanity.
 - `cpu_bytes_to_use` is **2 GiB deliberately**. GB10 is unified memory, so the CPU staging tier
   competes with the GPU KV pool — 32 GiB OOM-killed the worker.
