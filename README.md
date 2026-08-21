@@ -13,6 +13,7 @@ Scope is intentionally narrow: **this one checkpoint, this one hardware**. Not a
 - **[MODEL_VARIANTS.md](MODEL_VARIANTS.md)**: which HF checkpoints fit this setup (abliterated FP8, REAP-pruned) + what to try next.
 - **[TUNING.md](TUNING.md)**: the util→KV-pool lever (and the 0.85 startup cliff), single-stream ceiling, content-driven DSpark.
 - **[TROUBLESHOOTING.md](TROUBLESHOOTING.md)**: symptom → cause → fix table for every failure hit here.
+- **[PRODUCTION.md](PRODUCTION.md)** ← **START HERE**: the shipped production config, every value justified by measurement, plus what this hardware cannot do (SSD offload, ~2.5M KV) and why.
 - **[EUGR_B12X_PROD.md](EUGR_B12X_PROD.md)**: **the production path**: eugr b12x image, fp8_ds_mla KV, DSpark, 1.65M tokens, measured c1-c6. Includes why `nvfp4_ds_mla` is closed on this image.
 - **[PROD_C5_SSD.md](PROD_C5_SSD.md)**: production config: 5 clients, **SSD KV offload** (works; UPSTREAM_GAPS #7 was too pessimistic), param minimization, node housekeeping. **Not yet serving:** its NVFP4 KV pool dies in warmup.
 - **[examples/.env.dspark.example](examples/.env.dspark.example)** · **[scripts/clean-restart.sh](scripts/clean-restart.sh)** · **[scripts/bench.py](scripts/bench.py)**
