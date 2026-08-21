@@ -1,0 +1,521 @@
+############ 1. config/cache.py: dtype must be an accepted choice
+22-    "bfloat16",
+23-    "fp8",
+24-    "fp8_e4m3",
+25-    "fp8_e5m2",
+26-    "fp8_inc",
+27-    "fp8_ds_mla",
+28:    "nvfp4_ds_mla",
+29-    "turboquant_k8v4",
+30-    "turboquant_4bit_nc",
+31-    "turboquant_k3v4_nc",
+32-    "turboquant_3bit_nc",
+33-    "int4_per_token_head",
+34-    "int8_per_token_head",
+35-    "fp8_per_token_head",
+36:    "nvfp4",
+37-]
+38-MambaDType = Literal["auto", "float32", "float16", "bfloat16"]
+
+############ 2. utils/torch_utils.py: dtype mapping + full-dim helper
+47-    "turboquant_k8v4": torch.uint8,
+48-    "turboquant_4bit_nc": torch.uint8,
+49-    "turboquant_k3v4_nc": torch.uint8,
+50-    "turboquant_3bit_nc": torch.uint8,
+51:    "nvfp4": torch.uint8,
+52:    "nvfp4_ds_mla": torch.uint8,
+53-}
+54-
+55-TORCH_DTYPE_TO_NUMPY_DTYPE = {
+56-    torch.float16: np.float16,
+57-    torch.float32: np.float32,
+58-    torch.float64: np.float64,
+59-    torch.uint8: np.uint8,
+60-    torch.int32: np.int32,
+61-    torch.int64: np.int64,
+62-}
+63-
+64-
+65-MODELOPT_TO_VLLM_KV_CACHE_DTYPE_MAP = {
+66-    "fp8": "fp8_e4m3",
+67:    "nvfp4": "nvfp4",
+68-}
+69-
+70-T = TypeVar("T")
+71-
+72-
+73-PIN_MEMORY = is_pin_memory_available()
+74-
+75-
+76-def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:
+77-    return (
+78-        kv_cache_dtype.startswith("fp8")
+79-        or kv_cache_dtype.endswith("per_token_head")
+80:        or kv_cache_dtype in ("nvfp4", "nvfp4_ds_mla")
+81-    )
+82-
+83-
+84-def kv_cache_uses_per_token_head_scales(kv_cache_dtype: str) -> bool:
+85-    """Return True if *kv_cache_dtype* needs per-token-head scales."""
+86-    return kv_cache_dtype.endswith("per_token_head")
+87-
+88-
+89-def is_strictly_contiguous(t: torch.Tensor) -> bool:
+90-    """
+91-    Check if tensor is contiguous AND has no degenerate strides.
+92-
+93-    A degenerate stride occurs when a dimension has size 1 but the stride
+94-    doesn't match the canonical contiguous layout. This can cause issues
+--
+334-                and kv_algo.get("type") == "float"
+335-            ):
+336-                kv_algo = "fp8"
+337-            elif kv_algo.get("num_bits") == 4 and kv_algo.get("type") == "float":
+338:                kv_algo = "nvfp4"
+339-            else:
+340-                # Unknown/unsupported format - return "auto" as safe fallback
+341-                logger.warning(
+342-                    "WARNING: Unknown kv_cache_quant_algo '%s' in model "
+343-                    "config. Supported values: %s. Falling back to 'auto'.",
+344-                    f"{kv_algo}",
+345-                    list(MODELOPT_TO_VLLM_KV_CACHE_DTYPE_MAP.keys()),
+346-                )
+347-                return "auto"
+348-        if isinstance(kv_algo, str):
+349-            kv_algo_lower = kv_algo.lower()
+350-
+351-            # Try to map to vLLM's standard format
+352-            if kv_algo_lower in MODELOPT_TO_VLLM_KV_CACHE_DTYPE_MAP:
+--
+411-
+412-        current_platform.manual_seed_all(seed)
+413-
+414-
+415:def nvfp4_kv_cache_full_dim(head_size: int) -> int:
+416-    """Packed last dim for NVFP4 KV cache: fp4 data + fp8 block scales."""
+417-    return head_size // 2 + head_size // 16
+418-
+419-
+420:def _nvfp4_split_data_scale(
+421-    kv_side: torch.Tensor,
+422-) -> tuple[torch.Tensor, torch.Tensor]:
+423-    """Split a single NVFP4 KV-side buffer into data and scale views.
+424-
+425-    The input is a 4D tensor for one KV side (K or V) whose last
+426-    dimension is ``full_dim = data_dim + scale_dim``.  The physical
+427-    layout within each side is [data | scale], both packed contiguously.
+428-
+429-    Args:
+430-        kv_side: 4D uint8 tensor with shape
+431-            ``(num_pages, dim_1, dim_2, full_dim)``.
+432-            May be in any permutation order (NHD or HND).
+433-
+434-    Returns:
+--
+468-
+469-    return data, scale
+470-
+471-
+472:def nvfp4_kv_cache_split_views(kv_cache: torch.Tensor) -> tuple[tuple, tuple]:
+473-    """Split an NVFP4 KV cache tensor into data and scale views.
+474-
+475-    Accepts either a 5D tensor ``(num_pages, 2, dim_2, dim_3, full_dim)``
+476-    or a 4D single-side tensor ``(num_pages, dim_2, dim_3, full_dim)``.
+477-
+478-    Per-page layout: [K_data | K_scale | V_data | V_scale].
+479-    Each KV side is self-contained (data followed by its scale), so the
+480-    5D case simply splits each side independently.
+481-
+482-    The returned views are in the same dim order as the input (NHD or
+483-    HND), so callers get views matching whichever order they passed in.
+484-
+485-    Args:
+486-        kv_cache: 5D or 4D uint8 tensor where the last dimension is
+--
+492-        For 4D input (single KV side):
+493-            ``(data,), (scale,)``
+494-    """
+495-    if kv_cache.dim() == 4:
+496:        data, scale = _nvfp4_split_data_scale(kv_cache)
+497-        return (data,), (scale,)
+498-
+499:    k_data, k_scale = _nvfp4_split_data_scale(kv_cache[:, 0])
+500:    v_data, v_scale = _nvfp4_split_data_scale(kv_cache[:, 1])
+501-    return (k_data, v_data), (k_scale, v_scale)
+502-
+503-
+504-def create_kv_caches_with_random_flash(
+505-    num_blocks: int,
+506-    block_size: int,
+507-    num_layers: int,
+508-    num_heads: int,
+509-    head_size: int,
+510-    cache_dtype: str | torch.dtype | None,
+511-    model_dtype: str | torch.dtype | None = None,
+512-    seed: int | None = None,
+513-    device: str | None = "cuda",
+514-    cache_layout: str | None = "NHD",
+--
+526-    key_caches: list[torch.Tensor] = []
+527-    value_caches: list[torch.Tensor] = []
+528-
+529-    for _ in range(num_layers):
+530:        if cache_dtype == "nvfp4":
+531-            # Full page dim: fp4 data + fp8 block scales per head.
+532-            # Per page layout: [K_data | K_scale | V_data | V_scale]
+533-            # Returns [:, 0] and [:, 1] like all other dtypes.
+534:            full_dim = nvfp4_kv_cache_full_dim(head_size)
+535:            nvfp4_shape = (num_blocks, 2, block_size, num_heads, full_dim)
+536:            nvfp4_phys = tuple(nvfp4_shape[i] for i in stride_order)
+537-            inv = [stride_order.index(i) for i in range(len(stride_order))]
+538-            key_value_cache = torch.randint(
+539-                0,
+540-                256,
+541:                nvfp4_phys,
+542-                dtype=dtype,
+543-                device=device,
+544-            ).permute(*inv)
+545-        else:
+546-            key_value_cache = torch.empty(
+547-                size=kv_cache_allocation_shape, dtype=dtype, device=device
+548-            ).permute(*stride_order)
+549-            if cache_dtype in ["auto", "half", "bfloat16", "float"]:
+550-                key_value_cache.uniform_(-scale, scale)
+551-            elif cache_dtype == "fp8":
+552-                _generate_random_fp8(key_value_cache, -scale, scale)
+553-            else:
+554-                raise ValueError(f"Does not support key cache of type {cache_dtype}")
+555-        key_caches.append(key_value_cache[:, 0])
+
+############ 3. v1/kv_cache_interface.py: KVQuantMode + page accounting
+14-from typing_extensions import Self
+15-
+16-from vllm.logger import init_logger
+17-from vllm.utils.math_utils import cdiv, round_up
+18:from vllm.utils.torch_utils import get_dtype_size, nvfp4_kv_cache_full_dim
+19-from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
+20-from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
+21-
+22-if TYPE_CHECKING:
+23-    from vllm.config import VllmConfig
+24-
+25-logger = init_logger(__name__)
+26-
+27-
+28-# ---------------------------------------------------------------------------
+29-# KV cache quantization mode
+30-# ---------------------------------------------------------------------------
+--
+41-    FP8_PER_TENSOR = 1  # per-tensor scales (current fp8 path)
+42-    INT8_PER_TOKEN_HEAD = 2  # per-token-head dynamic scales for int8
+43-    FP8_PER_TOKEN_HEAD = 3  # per-token-head dynamic scales for fp8
+44-    INT4_PER_TOKEN_HEAD = 4  # packed 2×int4/byte, RHT + asymmetric zp
+45:    NVFP4 = 5  # packed fp4 data + fp8 block scales
+46-
+47-    @property
+48-    def is_per_token_head(self) -> bool:
+49-        """True for any per-token-head quantization mode."""
+50-        return self in (
+51-            KVQuantMode.INT8_PER_TOKEN_HEAD,
+52-            KVQuantMode.FP8_PER_TOKEN_HEAD,
+53-            KVQuantMode.INT4_PER_TOKEN_HEAD,
+54-        )
+55-
+56-    @property
+57:    def is_nvfp4(self) -> bool:
+58:        """True for NVFP4 packed quantization mode."""
+59:        return self == KVQuantMode.NVFP4
+60-
+61-
+62-def get_kv_quant_mode(kv_cache_dtype: str) -> KVQuantMode:
+63-    """Map a ``kv_cache_dtype`` string to a :class:`KVQuantMode`."""
+64-    if kv_cache_dtype == "int4_per_token_head":
+65-        return KVQuantMode.INT4_PER_TOKEN_HEAD
+66-    if kv_cache_dtype == "int8_per_token_head":
+67-        return KVQuantMode.INT8_PER_TOKEN_HEAD
+68-    if kv_cache_dtype == "fp8_per_token_head":
+69-        return KVQuantMode.FP8_PER_TOKEN_HEAD
+70:    if kv_cache_dtype in ("nvfp4", "nvfp4_ds_mla"):
+71:        return KVQuantMode.NVFP4
+72-    if isinstance(kv_cache_dtype, str) and kv_cache_dtype.startswith("fp8"):
+73-        return KVQuantMode.FP8_PER_TENSOR
+74-    return KVQuantMode.NONE
+75-
+76-
+77-def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:
+78-    return get_kv_quant_mode(kv_cache_dtype) != KVQuantMode.NONE
+79-
+80-
+81-def kv_cache_uses_per_token_head_scales(kv_cache_dtype: str) -> bool:
+82-    """Return True if *kv_cache_dtype* needs per-token-head scales."""
+83-    return get_kv_quant_mode(kv_cache_dtype).is_per_token_head
+--
+185-        return real_page_size
+186-
+187-    @property
+188-    def real_page_size_bytes(self) -> int:
+189:        if self.kv_quant_mode.is_nvfp4:
+190-            # Packed layout: fp4 data + fp8 block scales per head.
+191:            head_dim = nvfp4_kv_cache_full_dim(self.head_size)
+192-        elif self.kv_quant_mode == KVQuantMode.INT4_PER_TOKEN_HEAD:
+193-            head_dim = self.head_size // 2
+194-        else:
+195-            head_dim = self.head_size
+196-        return (
+197-            2
+198-            * self.block_size
+199-            * self.num_kv_heads
+200-            * head_dim
+201-            * get_dtype_size(self.dtype)
+202-        )
+203-
+--
+307-        return merged_spec
+308-
+309-    @property
+310-    def real_page_size_bytes(self) -> int:
+311:        if self.kv_quant_mode.is_nvfp4:
+312-            # Packed layout per head: fp4 data + fp8 block scales.
+313-            # fp4 data: head_size//2 bytes (2 fp4 values per byte)
+314-            # fp8 block scale: head_size//16 bytes (1 scale per 16 elements)
+315:            last_dim = nvfp4_kv_cache_full_dim(
+316-                self.head_size
+317:            ) + nvfp4_kv_cache_full_dim(self.head_size_v)
+318-        elif self.kv_quant_mode == KVQuantMode.INT4_PER_TOKEN_HEAD:
+319-            last_dim = self.head_size // 2 + self.head_size_v // 2
+320-        else:
+321-            last_dim = self.head_size + self.head_size_v
+322-        return (
+323-            self.block_size * self.num_kv_heads * last_dim * get_dtype_size(self.dtype)
+324-        )
+325-
+326-
+327-def _apply_alignment_padding(spec: MLAAttentionSpec | SlidingWindowMLASpec):
+328-    if spec.alignment is None:
+329-        return
+--
+377-        return self.block_size // self.compress_ratio
+378-
+379-    @property
+380-    def real_page_size_bytes(self) -> int:
+381:        if self.cache_dtype_str in ("fp8_ds_mla", "nvfp4_ds_mla"):
+382-            if self.model_version == "deepseek_v4":
+383-                # DeepseekV4 uses the padded 584-byte sparse-MLA envelope for
+384:                # both fp8_ds_mla and nvfp4_ds_mla. head_size stays semantic
+385-                # (512); bytes are determined by the backend layout here.
+386-                return self.storage_block_size * 584
+387-            # V3.2 main MLA: 656-byte custom layout (kv_lora_rank=512 +
+388-            # qk_rope_head_dim=64, head_size=576). See flashmla_sparse.py.
+389-            return self.block_size * 656
+390-        if self.kv_quant_mode == KVQuantMode.INT4_PER_TOKEN_HEAD:
+391-            head_dim = self.head_size // 2
+392-        else:
+393-            head_dim = self.head_size
+394-        return (
+395-            self.storage_block_size
+396-            * self.num_kv_heads
+--
+525-            object.__setattr__(self, "head_size_v", self.head_size)
+526-
+527-    @property
+528-    def real_page_size_bytes(self) -> int:
+529:        # Mirror ``FullAttentionSpec.real_page_size_bytes`` for NVFP4 KV cache.
+530:        if self.kv_quant_mode.is_nvfp4:
+531:            last_dim = nvfp4_kv_cache_full_dim(
+532-                self.head_size
+533:            ) + nvfp4_kv_cache_full_dim(self.head_size_v)
+534-            return (
+535-                self.block_size
+536-                * self.num_kv_heads
+537-                * last_dim
+538-                * get_dtype_size(self.dtype)
+539-            )
+540-        return (
+541-            self.block_size
+542-            * self.num_kv_heads
+543-            * (self.head_size + self.head_size_v)
+544-            * get_dtype_size(self.dtype)
+545-        )
+--
+607-    @property
+608-    def real_page_size_bytes(self) -> int:
+609-        if self.model_version == "deepseek_v4" and self.cache_dtype_str in (
+610-            "fp8_ds_mla",
+611:            "nvfp4_ds_mla",
+612-        ):
+613-            # DeepseekV4 FlashMLA: 448B NoPE + 128B RoPE + 8B fp8 scale = 584B
+614-            # per token. FlashInfer's contiguous bf16/fp8 cache falls through to
+615-            # the element-size formula below.
+616-            return self.storage_block_size * 584
+617-        assert self.model_version in (None, "deepseek_v4"), (
+618-            f"Unsupported model version: {self.model_version}"
+619-        )
+620-        return (
+621-            self.storage_block_size
+622-            * self.num_kv_heads
+623-            * self.head_size
+
+############ 4. models/deepseek_v4/attention.py: layout selection + 584 envelope
+77-    canonical ``fp8_ds_mla`` string is written back onto ``cache_config`` so the
+78-    page-size specs pick the 576B per-token slot). Plain-row backends store each
+79-    token's KV row in its element dtype: bf16 or per-tensor FP8 E4M3.
+80-    """
+81:    if kv_cache_dtype in ("nvfp4", "nvfp4_ds_mla"):
+82-        assert use_fp8_ds_mla_layout, (
+83:            "DeepseekV4 nvfp4 KV cache requires the sparse MLA padded layout"
+84-        )
+85-        if cache_config is not None:
+86:            cache_config.cache_dtype = "nvfp4_ds_mla"
+87:        logger.info_once("Using DeepSeek V4 padded nvfp4_ds_mla KV cache format.")
+88:        return "nvfp4_ds_mla", torch.uint8
+89-
+90-    if use_fp8_ds_mla_layout:
+91-        # fp8_ds_mla block format: UE8M0 block-scaled fp8 packed as uint8.
+92-        assert kv_cache_dtype.startswith("fp8"), (
+93-            f"DeepseekV4 fp8_ds_mla layout only supports fp8 kv-cache, "
+94-            f"got {kv_cache_dtype}"
+95-        )
+96-        if kv_cache_dtype != "fp8_ds_mla":
+97-            if cache_config is not None:
+98-                cache_config.cache_dtype = "fp8_ds_mla"
+99-            kv_cache_dtype = "fp8_ds_mla"
+100-            logger.info_once("Using DeepSeek's fp8_ds_mla KV cache format.")
+--
+615-        if (
+616-            self.compress_ratio <= 1
+617-        ):  # SWA part. Allocated separately as DeepseekV4SWACache.
+618-            return None
+619:        # fp8_ds_mla/nvfp4_ds_mla are padded uint8 layouts. Keep the upstream
+620-        # FP8 alignment and use the proven 584-byte DSpark NVFP4 envelope.
+621-        uses_ds_mla_layout = self.kv_cache_dtype in (
+622-            "fp8_ds_mla",
+623:            "nvfp4_ds_mla",
+624-        )
+625-        alignment = (
+626-            584
+627:            if self.kv_cache_dtype == "nvfp4_ds_mla"
+628-            else 576
+629-            if self.kv_cache_dtype == "fp8_ds_mla"
+630-            else 512
+631-        )
+632-        return MLAAttentionSpec(
+633-            block_size=vllm_config.cache_config.block_size,
+634-            num_kv_heads=1,
+635-            head_size=self.head_dim,
+636-            dtype=torch.uint8 if uses_ds_mla_layout else self.kv_cache_torch_dtype,
+637-            compress_ratio=self.compress_ratio,
+638-            cache_dtype_str=self.kv_cache_dtype,
+639-            alignment=alignment,
+
+############ 5. models/deepseek_v4/sparse_mla.py
+45-    supported_dtypes: ClassVar[list[torch.dtype]] = [torch.bfloat16]
+46-    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
+47-        "auto",
+48-        "fp8_ds_mla",
+49:        "nvfp4_ds_mla",
+50-        "fp8",  # alias for fp8_ds_mla
+51-    ]
+52-
+53-    @staticmethod
+54-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+55-        return [256]
+56-
+57-    @staticmethod
+58-    def get_name() -> str:
+59-        return "FLASHMLA_SPARSE_DSV4"
+--
+100-        num_kv_heads: int,
+101-        head_size: int,
+102-        cache_dtype_str: str = "auto",
+103-    ) -> tuple[int, ...]:
+104:        if cache_dtype_str in ("fp8_ds_mla", "nvfp4_ds_mla"):
+105-            # DeepseekV4 main MLA: 584B per token (448 NoPE + 128 RoPE + 8 fp8 scale).
+106-            # head_size passed in is the semantic head_dim (512).
+107-            return (num_blocks, block_size, 584)
+108-        else:
+109-            return (num_blocks, block_size, head_size)
+110-
+111-
+112-@dataclass
+113-class DeepseekV4FlashMLAMetadata(AttentionMetadata):
+114-    num_reqs: int
+
+############ 6. backends: flashmla_sparse.py
+93-        "auto",
+94-        "bfloat16",
+95-        "fp8_ds_mla",
+96:        "nvfp4_ds_mla",
+97-        "fp8",  # alias for fp8_ds_mla
+98-    ]
+99-
+100-    @staticmethod
+101-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+102-        return [64]
+103-
+104-    @staticmethod
+105-    def get_name() -> str:
+106-        return "FLASHMLA_SPARSE"
+--
+585-        max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+586-        q_concat_shape = (max_tokens, num_heads, head_size)
+587-        if is_quantized_kv_cache(kv_cache_dtype):
+588:            assert kv_cache_dtype in ("fp8_ds_mla", "nvfp4_ds_mla"), (
+589-                "FlashMLA Sparse Attention backend only supports "
+590:                "fp8_ds_mla/nvfp4_ds_mla kv-cache dtype"
+591-            )
+592-
+593:        if kv_cache_dtype in ("fp8_ds_mla", "nvfp4_ds_mla"):
+594-            # Reserve workspace during initialization
+595-            assert vllm_config is not None and vllm_config.model_config is not None
+596-            prefill_workspace_size = get_prefill_workspace_size(
+597-                vllm_config.model_config.max_model_len
+598-            )
+599-            self.prefill_workspace_shape = (prefill_workspace_size, head_size)
+600-            self.q_concat_buffer, self.prefill_bf16_workspace = (
+601-                current_workspace_manager().get_simultaneous(
+602-                    (q_concat_shape, torch.bfloat16),
+603-                    (self.prefill_workspace_shape, torch.bfloat16),
+
+############ 7. backends: sparse_swa.py
+84-        # token envelope. Keep the upstream 576B FP8 alignment, while the
+85-        # DSpark NVFP4 layout is naturally aligned to its 584B token size.
+86-        uses_fp8_ds_mla_layout = self.cache_config.cache_dtype == "fp8_ds_mla"
+87:        uses_nvfp4_ds_mla_layout = (
+88:            self.cache_config.cache_dtype == "nvfp4_ds_mla"
+89-        )
+90-        return SlidingWindowMLASpec(
+91-            block_size=self.block_size,
+92-            num_kv_heads=1,
+93-            head_size=self.head_dim,
+94-            dtype=self.dtype,
+95-            sliding_window=self.window_size,
+96-            cache_dtype_str=self.cache_config.cache_dtype,
+97-            # 576B for FlashMLA packing; 512B for FlashInfer sparse (#44577).
+98-            alignment=(
+99-                584
+100:                if uses_nvfp4_ds_mla_layout
+101-                else 576
+102-                if uses_fp8_ds_mla_layout
+103-                else 512
+104-            ),
+105-            model_version="deepseek_v4",
+106-            kv_quant_mode=get_kv_quant_mode(self.cache_config.cache_dtype),
+107-        )
+108-
+109-    def forward(self): ...
+110-
+--
+148-        cache_dtype_str: str = "auto",
+149-    ) -> tuple[int, ...]:
+150-        assert num_kv_heads == 1
+151:        if cache_dtype_str in ("fp8_ds_mla", "nvfp4_ds_mla"):
+152-            # DeepseekV4 SWA: 584B per token (448 NoPE + 128 RoPE + 8 fp8 scale).
+153-            # head_size passed in is the semantic head_dim (512).
+154-            return (num_blocks, block_size, 584)
+155-        else:
+156-            return (num_blocks, block_size, head_size)
+157-
+158-    @staticmethod
+159-    def get_kv_cache_stride_order(
+160-        include_num_layers_dimension: bool = False,
+161-    ) -> tuple[int, ...]:
