@@ -166,16 +166,29 @@ GPU KV cache size: 1,652,056 tokens
 
 c6 falls below c3: `max_num_seqs 6` is the saturation point.
 
+### Always launch via `scripts/spark-launch.sh`
+
+```bash
+./spark-launch.sh eugr-prod.yaml ~/eugr-prod.log
+```
+
+It tears down both nodes, sweeps `/dev/shm` on both, prints free memory, then
+launches into a detached `screen`. The sweep is not optional: GB10 is unified
+memory, so orphaned segments from a killed run eat the DRAM the GPU allocates its
+KV pool from and silently lower the next boot's ceiling.
+
 ### Utilization ceiling
 
-`gpu_memory_utilization` 0.92 fails at startup on this hardware:
+| util | tokens | outcome |
+|---|---:|---|
+| 0.85 | ~1.00M | fails, below the 11.04 GiB one 1M request needs |
+| **0.89** | **1,652,056** | **serves** |
+| 0.91 | 1,941,101 | allocates, worker then SIGKILLed with no error |
+| 0.92 | n/a | fails: `Free memory on device cuda:0 (111.46/121.69 GiB)` |
 
-```
-ValueError: Free memory on device cuda:0 (111.46/121.69 GiB) on startup is less
-than desired GPU memory utilization
-```
-
-0.92 asks for 111.95 GiB against 111.46 free, so ~0.915 is the practical ceiling.
+At 0.91 the head logs the full pool and continues while the worker dies silently,
+then the head hangs in `shm_broadcast`. The only evidence is in the worker's own
+log inside its container (`/tmp/sparkrun_serve.log`), not the head log.
 
 ### Do not set `kv_cache_dtype: nvfp4_ds_mla` here
 

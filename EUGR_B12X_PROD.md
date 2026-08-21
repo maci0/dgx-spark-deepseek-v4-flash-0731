@@ -76,8 +76,34 @@ which DeepSeek-V4 does not support here, and util ~0.98 on fp8 leaves nothing fo
 activations. Realistic range on the eugr lineage is **1.65M at util 0.89**, with
 higher utilization traded against stability.
 
-Measured at util 0.89: **`fp8_ds_mla` = 1,652,056 tokens** (1.58x a full 1M
-context), serving.
+### Utilization ladder, measured
+
+| util | KV pool | tokens | outcome |
+|---|---:|---:|---|
+| 0.85 | 10.85 GiB | ~1.00M | **fails**: below the 11.04 GiB needed for one 1M request |
+| **0.89** | ~17.4 GiB | **1,652,056** | **serves**, benchmarked in §6 |
+| 0.91 | 18.7 GiB | 1,941,101 | allocates, then the **worker is SIGKILLed** mid-allocation |
+| 0.92 | n/a | n/a | **fails at startup**: `Free memory on device cuda:0 (111.46/121.69 GiB)` |
+
+**0.89 is the shipped value.** 0.91 is instructive: the head reports the full
+1,941,101-token pool and keeps going, while the worker dies during allocation
+with no error, no traceback, and no CUDA OOM. It is not the OOM killer either,
+`/proc/vmstat oom_kill` stays 0 on both nodes and the container reports
+`OOMKilled=false` with cgroup `oom_kill 0`. The only trace is bash reporting the
+signal in the worker's own log:
+
+```
+/tmp/sparkrun_serve.sh: line 26:   120 Killed   vllm serve drowzeys/...
+```
+
+The head then hangs in `shm_broadcast` forever. Treat a silent worker death at
+KV allocation as "utilization too high", and note that this is invisible from the
+head log alone.
+
+Between runs, always clear `/dev/shm` on **both** nodes. Orphaned segments from a
+killed run consume the same DRAM the GPU allocates from, so they silently lower
+the ceiling on the next boot. [`scripts/spark-launch.sh`](scripts/spark-launch.sh)
+does the teardown, the two-node sweep and the launch in one step.
 
 ---
 
