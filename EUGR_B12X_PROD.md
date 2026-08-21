@@ -142,9 +142,13 @@ is deliberately left alone. Supplying that writer is exactly what the stage-c
 overlay's "padded `nvfp4_ds_mla` writer" existed for.
 
 **Practical consequence:** on the eugr lineage the KV pool is fp8_ds_mla at
-~11.0 KB/token, and capacity is bought only with `gpu_memory_utilization`. The
-~2.5M target needs the stage-c stack, which has never reached a serving state
-(see [PROD_C5_SSD.md](PROD_C5_SSD.md)).
+~11.0 KB/token, and capacity is bought only with `gpu_memory_utilization`.
+
+NVFP4 KV **is** reachable, but only on the stage-c stack, whose overlay supplies
+the missing sm12x DeepSeek-V4 writer. That is measured, not theoretical:
+`examples/stagec-nvfp4-prod.yaml` serves **2,198,373 tokens** with
+`kv_cache_dtype=nvfp4_ds_mla` confirmed live in the log. See §8 for the
+head-to-head.
 
 The patch script is kept only as documentation of gate 1 and is **not** part of
 the shipped recipe. If revisiting: `VllmConfig` is a pydantic *dataclass* whose
@@ -211,3 +215,47 @@ and which measured **harmful on the stage-c stack**:
 
 Also untested here: k=3 vs k=5, `max_num_seqs` 6 vs 8, and `--kv-cache-memory-bytes`
 in place of `gpu_memory_utilization`.
+
+
+---
+
+## 8. Head-to-head: eugr fp8_ds_mla vs stage-c nvfp4_ds_mla
+
+Both configurations serve. Both use the same abliterated model, DSpark k=5,
+`max_num_seqs 6`, and b12x MoE. Measured warm, 128 tok/req.
+
+| | eugr + `fp8_ds_mla` | stage-c + `nvfp4_ds_mla` |
+|---|---:|---:|
+| recipe | [`eugr-prod.yaml`](examples/eugr-prod.yaml) | [`stagec-nvfp4-prod.yaml`](examples/stagec-nvfp4-prod.yaml) |
+| image | eugr nightly `2026081903`, stock | `bjk110/vllm-spark@sha256:d8492e76` + overlay |
+| `gpu_memory_utilization` | 0.89 | 0.82 |
+| **KV pool** | 1,674,044 | **2,198,373** (+31%) |
+| c1 tok/s | **60.3** | 47.6 |
+| c3 aggregate | **101.3** | 98.1 |
+| **c5 aggregate** | **135.0** | 109.7 (-19%) |
+| recipe size | **73 lines, 0 `pre_exec`** | 344 lines, 2 `pre_exec` |
+
+**Choose by what is scarce.** NVFP4 buys 31% more KV and costs ~19% throughput at
+c5. For 3-5 concurrent sessions that do not need enormous shared context, the
+eugr config is faster and far simpler. When total context is the binding
+constraint, stage-c is the only way past ~1.7M on this hardware.
+
+### Getting stage-c to boot at all
+
+Two stage-c recipes fail before the model ever loads, with
+
+```
+ValueError: Model architectures ['DeepseekV4ForCausalLM'] failed to be inspected
+```
+
+raised from a subprocess whose stderr vLLM discards. This is **not** the model
+(the base `deepseek-ai` model fails identically, and both `config.json` files are
+byte-identical), **not** the image (the prebuilt overlay image fails the same
+way), and not a missing download. It is the `nvfp4-1m` recipe itself, which
+carries env vars vLLM flags as unknown (`VLLM_SKIP_INIT_MEMORY_CHECK`,
+`VLLM_TRITON_MLA_SPARSE`) and `mods` that do not resolve here.
+
+The working route is to start from the arena-threshold recipe, which boots
+reliably, and change only what the KV dtype requires: `nvfp4_ds_mla`,
+`max_num_seqs 6`, k=5, util 0.82. KV dtype and seqs/k must move together, since
+spec-decode buffers scale with `max_num_seqs x (k+1)`.

@@ -27,11 +27,12 @@ pkill -9 -f '[s]parkrun' 2>/dev/null || true
 
 # Remove by explicit name: a piped `docker ps -q | xargs docker rm` has proved
 # unreliable over nested ssh here.
-docker ps -a --format '{{.Names}}' | grep '^sparkrun' | while read -r n; do
+# `|| true`: with pipefail an empty grep (nothing to remove) would abort the script.
+{ docker ps -a --format '{{.Names}}' | grep '^sparkrun' || true; } | while read -r n; do
   docker rm -f "$n" >/dev/null 2>&1 && echo "    removed $n (head)"
 done
 ssh -o StrictHostKeyChecking=no "$WORKER" '
-  docker ps -a --format "{{.Names}}" | grep "^sparkrun" | while read -r n; do
+  { docker ps -a --format "{{.Names}}" | grep "^sparkrun" || true; } | while read -r n; do
     docker rm -f "$n" >/dev/null 2>&1 && echo "    removed $n (worker)"
   done' 2>/dev/null || true
 

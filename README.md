@@ -38,8 +38,9 @@ Scope is intentionally narrow: **this one checkpoint, this one hardware**. Not a
 |------|-------------------|-------|-----|------|----------|
 | **Max context (1M)** | vLLM, tonyd2wild `dspark-nvfp4-stage-c` (bjk110 base) | FP8 weights + **NVFP4 KV** | **1,048,576** | DSpark k5 | ~37-41 tok/s/stream @ c1-3; KV pools >1.5M allocate but have not reached serving |
 | **Max throughput (≤512K)** | vLLM, eugr `spark-vllm-b12x` | FP8 (UE8M0) | 512K | off | **~326 tok/s @ c48** |
-| **Prod, 3-5 sessions (SHIPPED)** | vLLM, eugr `dgx-vllm-eugr-nightly-b12x:2026081903` | FP8 weights + **fp8_ds_mla KV** | 1M | DSpark k=5 | **1,652,056-token KV, 140.3 tok/s agg @ c5**, b12x MoE, zero patches. See [EUGR_B12X_PROD.md](EUGR_B12X_PROD.md) |
-| **Prod, 5 clients + SSD KV spill** | vLLM, tonyd2wild `dspark-nvfp4-stage-c` | FP8 weights + **NVFP4 KV** | 1M | DSpark k=5 | ⚠️ **does not serve yet**: allocates a 2.23M-token pool, then the worker dies in warmup. SSD offload itself works. See [PROD_C5_SSD.md](PROD_C5_SSD.md) |
+| **Prod, 3-5 sessions (fastest)** | vLLM, eugr `dgx-vllm-eugr-nightly-b12x:2026081903` | FP8 weights + **fp8_ds_mla KV** | 1M | DSpark k=5 | **1,674,044-token KV, 135.0 tok/s agg @ c5**, b12x MoE, zero patches, 73-line recipe |
+| **Prod, 3-5 sessions (max context)** | vLLM, tonyd2wild `dspark-nvfp4-stage-c` | FP8 weights + **NVFP4 KV** | 1M | DSpark k=5 | **2,198,373-token KV** (+31%), 109.7 tok/s agg @ c5 (-19%). Only route past ~1.7M |
+| **Prod, 5 clients + SSD KV spill** | vLLM, tonyd2wild `dspark-nvfp4-stage-c` | FP8 weights + **NVFP4 KV** | 1M | DSpark k=5 | superseded by the two rows above; kept for the SSD-offload findings. See [PROD_C5_SSD.md](PROD_C5_SSD.md) |
 
 Everything else is worse or broken on this hardware, see the matrix.
 

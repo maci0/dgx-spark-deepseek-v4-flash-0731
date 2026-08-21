@@ -3,9 +3,11 @@
 Target: a **production** serve (not a leaderboard run) for ~5 concurrent clients with the
 largest practical KV pool and KV spill to NVMe, using as few non-stock knobs as possible.
 
-**Status: not shipped.** The SSD offload path and the parameter set below are settled, but the
-NVFP4 KV pool that makes ~2.2M tokens possible has never survived startup (§4). For a config
-that actually serves today, use
+**Status: superseded.** The SSD offload path and the parameter set below are settled, and the
+NVFP4 KV pool DOES serve: see [EUGR_B12X_PROD.md](EUGR_B12X_PROD.md) §8, where stage-c with
+`nvfp4_ds_mla` reaches 2,198,373 tokens. The startup failures recorded in §4 were an
+environment problem cleared by a reboot, not a property of NVFP4. What remains unverified here
+is specifically the SSD-offload combination. For the current shipped configs use
 [`examples/deepseek-v4-flash-0731-dspark-arena-threshold.yaml`](examples/deepseek-v4-flash-0731-dspark-arena-threshold.yaml)
 (fp8, 1.45M tokens, 162.5 tok/s aggregate at c5).
 
