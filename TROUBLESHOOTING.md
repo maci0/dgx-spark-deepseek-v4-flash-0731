@@ -172,3 +172,35 @@ gives the exact arithmetic, which is the cheapest way to measure bytes/token:
 11.04 GiB / 1,048,576 = ~11.0 KB/token for `fp8_ds_mla`. Raise
 `gpu_memory_utilization`, lower `max_model_len`, or pin the pool with
 `--kv-cache-memory-bytes`.
+
+
+---
+
+## Automating boot-and-benchmark sweeps: what not to check
+
+Three "liveness" checks in a sweep harness each produced false negatives and cost
+a full sweep round. They race the launcher, so do not use them:
+
+| Check | Why it is wrong |
+|---|---|
+| `screen` session alive | sparkrun is **not** a daemon; it exits after `[6/6] Post-launch hooks` while the server is still coming up |
+| container present | sparkrun's containers take ~2 min to appear, so a check at loop start always fails |
+| editing the script mid-run | bash reads scripts incrementally: overwriting a running script makes it execute garbage from a shifted offset (`syntax error near unexpected token`) and can tear down the run being measured |
+
+Only four outcomes are decidable without racing anything:
+
+```
+health 200                     -> measure
+explicit vLLM error in log     -> FAILED
+>=3 shm_broadcast stalls       -> WORKER_KILLED (worker died; head waits forever)
+deadline reached               -> TIMEOUT
+```
+
+See [`scripts/sweep.sh`](scripts/sweep.sh). Note the error grep must be broad:
+a pydantic `value_error` (for example `DSpark requires num_speculative_tokens >=
+dspark_block_size`) does not contain `ValueError:` and will otherwise sit until
+the deadline.
+
+Always clear `/dev/shm` on both nodes between runs, via
+[`scripts/spark-launch.sh`](scripts/spark-launch.sh). Two boots of the same
+config differed by 22k KV tokens purely from leftover segments.

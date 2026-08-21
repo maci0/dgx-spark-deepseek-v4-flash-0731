@@ -147,7 +147,7 @@ overlay's "padded `nvfp4_ds_mla` writer" existed for.
 NVFP4 KV **is** reachable, but only on the stage-c stack, whose overlay supplies
 the missing sm12x DeepSeek-V4 writer. That is measured, not theoretical:
 `examples/stagec-nvfp4-prod.yaml` serves **2,198,373 tokens** with
-`kv_cache_dtype=nvfp4_ds_mla` confirmed live in the log. See §8 for the
+`kv_cache_dtype=nvfp4_ds_mla` confirmed live in the log. See §9 for the
 head-to-head.
 
 The patch script is kept only as documentation of gate 1 and is **not** part of
@@ -202,24 +202,83 @@ optimum until the ablations in §7 are run.
 
 ---
 
-## 7. Open optimization work
+## 7. Tuning sweep: `max_num_seqs` 6 is optimal
 
-Flags currently enabled only because they are eugr's defaults for this image,
-and which measured **harmful on the stage-c stack**:
+Every config below is the shipped recipe with one setting changed, booted from
+scratch, warmed, then measured. Aggregate tok/s, 128 tok/req.
 
-| Flag | Stage-c result | Status here |
-|---|---|---|
-| `VLLM_USE_B12X_MHC` | clearly worse (arena raw 37.95 vs 44.75) | untested |
-| `VLLM_USE_B12X_SPARSE_INDEXER` | -2.6% | untested |
-| `VLLM_USE_B12X_FP8_GEMM` | crashed (`DeepGEMM/utils/layout.hpp:39: t.dim() == N`) | untested, does not crash here |
+| config | slots (`seqs x (k+1)`) | KV tokens | c1 | c3 | c5 |
+|---|---:|---:|---:|---:|---:|
+| **`max_num_seqs` 6, k=5** | 36 | **1,663,439** | 51.2 | **105.6** | **140.2** |
+| `max_num_seqs` 8, k=5 | 48 | 1,638,922 | 49.5 | 102.7 | 129.4 |
+| `max_num_seqs` 12, k=5 | 72 | 1,635,809 | 53.6 | 92.9 | 124.0 |
 
-Also untested here: k=3 vs k=5, `max_num_seqs` 6 vs 8, and `--kv-cache-memory-bytes`
-in place of `gpu_memory_utilization`.
+Monotonic: **raising `max_num_seqs` costs both throughput and KV.** With only 5
+live streams the extra slots are never filled, so they buy nothing while adding
+scheduling overhead and taking memory from the pool. The c6 rolloff seen at
+seqs 6 is therefore a *compute* limit, not a slot limit. Leave it at 6.
+
+Reproducibility: `s6_k5` measured c5 = 140.3 / 135.0 / 140.2 across three
+independent boots, so treat anything under ~5% as noise and weight c3/c5 over c1
+(which swings 51-60).
+
+### k is not tunable here
+
+k=3 is rejected outright by this image:
+
+```
+DSpark requires num_speculative_tokens >= dspark_block_size (5); got 3
+```
+
+k must be **>= 5 and a multiple of 5**, so 5 and 10 are the only legal values.
+This differs from stage-c, where k=3 was legal and measured 6.7% faster.
+
+### Still untested
+
+`draft_sample_method: greedy` (bjk110 ships greedy), k=10,
+`max_num_batched_tokens`, `cudagraph_mode: FULL_DECODE_ONLY`, and the b12x flags
+individually (`MHC`, `SPARSE_INDEXER`, `FP8_GEMM` all measured harmful on
+stage-c; removing all three at once failed to boot, so they need one at a time).
+
+---
+
+## 8. SSD KV offload does NOT work on this image
+
+**Tested and closed.** `OffloadingConnector` with a `fs_python` disk tier makes
+the worker die during startup with:
+
+```
+RuntimeError: Worker failed with error 'CUDA error: an illegal memory access
+was encountered'
+```
+
+Verified twice, so it is not a b12x interaction:
+
+| attention backend | result |
+|---|---|
+| `B12X_MLA_SPARSE` | illegal memory access |
+| default (FlashInfer SM120) | illegal memory access |
+
+The config itself is correct: the flag renders properly, `/kvspill` is bound from
+NVMe (ext4, 1.6 TB free), and `PYTORCH_CUDA_ALLOC_CONF` is set to
+`garbage_collection_threshold:0.9` because offload connectors reject
+`expandable_segments` outright.
+
+**This is deliberately not worked around.** An illegal memory access means the KV
+buffers the connector registers are not laid out the way the DeepSeek-V4 kernels
+read them. The same class of bug can produce silently wrong tokens instead of a
+crash, so forcing it would be worse than shipping without offload.
+[`examples/eugr-prod-ssd.yaml`](examples/eugr-prod-ssd.yaml) is kept as a record
+of the attempt.
+
+Practical note: the 1.66M-token pool already holds ~1.6 full 1M-context sessions,
+so offload would buy cross-session reuse rather than capacity that is currently
+short.
 
 
 ---
 
-## 8. Head-to-head: eugr fp8_ds_mla vs stage-c nvfp4_ds_mla
+## 9. Head-to-head: eugr fp8_ds_mla vs stage-c nvfp4_ds_mla
 
 Both configurations serve. Both use the same abliterated model, DSpark k=5,
 `max_num_seqs 6`, and b12x MoE. Measured warm, 128 tok/req.

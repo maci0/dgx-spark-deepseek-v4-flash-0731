@@ -195,3 +195,22 @@ log inside its container (`/tmp/sparkrun_serve.log`), not the head log.
 It is rejected twice, and the second rejection is real. See §4 of
 [EUGR_B12X_PROD.md](../EUGR_B12X_PROD.md). `eugr-prod-nvfp4.yaml` is kept only as
 a record of that attempt.
+
+
+### Tuning: leave `max_num_seqs` at 6
+
+| config | KV tokens | c3 | c5 |
+|---|---:|---:|---:|
+| **seqs 6, k=5 (shipped)** | **1,663,439** | **105.6** | **140.2** |
+| seqs 8, k=5 | 1,638,922 | 102.7 | 129.4 |
+| seqs 12, k=5 | 1,635,809 | 92.9 | 124.0 |
+
+Raising it costs throughput *and* KV: 5 live streams never fill the extra slots.
+k=3 is rejected on this image (`DSpark requires num_speculative_tokens >=
+dspark_block_size (5)`), so k must be 5 or 10.
+
+### Do not enable SSD KV offload on this image
+
+`examples/eugr-prod-ssd.yaml` reproduces `CUDA error: an illegal memory access
+was encountered` during startup, with and without the b12x attention backend. It
+is kept only as a record. See EUGR_B12X_PROD.md §8.
