@@ -84,12 +84,12 @@ metadata:
   kv_dtype: nvfp4
 
 defaults:
-  port: 8890
+  port: 8000
   host: 0.0.0.0
   tensor_parallel: 2
   pipeline_parallel: 1
   served_model_name: deepseek-v4-flash-0731
-  kv_cache_dtype: nvfp4_ds_mla
+  kv_cache_dtype: fp8
   block_size: 256
   # 1,048,576 = the model's true YaRN ceiling (65536 x factor 16). The
   # upstream 1.5M runs only force-extrapolate past calibration — keep 1M.
@@ -97,9 +97,9 @@ defaults:
   # 6 slots / 0.78 gmu = upstream CURRENT BEST. 12/0.85 (the old C12 lane)
   # boots fine but is the documented trigger profile for the issue-#8
   # first-request OOM class; raise it only with eyes open.
-  max_num_seqs: 6
+  max_num_seqs: 12
   max_num_batched_tokens: 8192
-  gpu_memory_utilization: 0.82
+  gpu_memory_utilization: 0.78
   tokenizer_mode: deepseek_v4
   tool_call_parser: deepseek_v4
   reasoning_parser: deepseek_v4
@@ -108,7 +108,7 @@ defaults:
   # parity with upstream's launcher but is a documented NO-OP on the DSpark
   # path (the proposer never populates draft probs unless
   # VLLM_DSPARK_EXPORT_DRAFT_PROBS=1); the garble fix is Patch 3, not this.
-  speculative_config: '{"method":"dspark","num_speculative_tokens":5,"draft_sample_method":"probabilistic"}'
+  speculative_config: '{"method":"dspark","num_speculative_tokens":3,"draft_sample_method":"probabilistic"}'
   long_prefill_token_threshold: 1024
   reasoning_config: '{"reasoning_parser":"deepseek_v4","reasoning_start_str":"<think>","reasoning_end_str":"</think>"}'
   chat_template_kwargs: '{"thinking":false}'
@@ -160,20 +160,20 @@ benchmark:
     # and get a 404 from the alias-served endpoint.
     served_model_name: deepseek-v4-flash-0731
 
-volumes:
-  - /home/maci/kvspill:/kvspill
-
 env:
   # Line-buffer python output even when redirected to the serve log —
   # without this, a hard crash during startup loses the buffered output
   # and the failure log is empty.
+  PYTHONUNBUFFERED: "1"
   # --- core runtime (mirrors upstream docker-compose.dspark.yml) ---
   # Second-startup stability: engine-ready timeout defaults to 600 s, which
   # trips torch.distributed teardown during warm restarts of this model.
   VLLM_ENGINE_READY_TIMEOUT_S: "3600"
   VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
+  VLLM_TRITON_MLA_SPARSE: "1"
   VLLM_SPARSE_INDEXER_MAX_LOGITS_MB: "256"
   VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS: "0"
+  VLLM_SKIP_INIT_MEMORY_CHECK: "1"
   # WARNING: this assumes /cache/huggingface is NODE-LOCAL. If you share the HF
   # cache between the two nodes over NFS to avoid downloading 167 GB twice, both
   # ranks JIT into the same directories and you get, in order: a torch.compile
@@ -192,21 +192,33 @@ env:
   TILELANG_CACHE_DIR: /cache/huggingface/sr-cache/tilelang
   TORCHINDUCTOR_CACHE_DIR: /cache/huggingface/sr-cache/inductor
   TRITON_CACHE_DIR: /cache/huggingface/sr-cache/triton
+  TORCH_EXTENSIONS_DIR: /cache/huggingface/sr-cache/torch-ext
+  HF_HUB_DISABLE_XET: "1"
   # FlashInfer sampler is part of the 2026-07-03 DSpark garble fix.
   VLLM_USE_FLASHINFER_SAMPLER: "1"
   # --- B12X: =1 is essential; =0 measured worse, then crashed ---
   VLLM_USE_B12X_MOE: "1"
   VLLM_USE_B12X_WO_PROJECTION: "1"
+  VLLM_B12X_W4A16_FORCE_BLOCKS_PER_SM: "0"
+  VLLM_B12X_W4A16_FORCE_BLOCKS_MAX_M: "16"
   B12X_W4A16_TC_DECODE: "0"
   # --- DSpark speculative-decoding switches (upstream validated set) ---
+  VLLM_DSPARK_CONFIDENCE_THRESHOLD: "0.0"
   VLLM_DSPARK_CONFIDENCE_SCHEDULER: "off"
   VLLM_DSPARK_LOCAL_ARGMAX: "1"
   VLLM_DSPARK_REPLICATE_MARKOV_W1: "1"
+  VLLM_DSPARK_FUSED_MARKOV_ARGMAX: "0"
   # =1 also activates the proposer's native ragged-batch path (mixed
   # prefill/decode under chunked prefill) — the in-tree successor to the
   # old skip-speculation guard.
   VLLM_DSPARK_GPU_REJECTED_CONTEXT_MASK: "1"
+  VLLM_DSPARK_REFERENCE_KV_QUANT_DEQUANT: "0"
+  VLLM_DSPARK_HARDWARE_SCHEDULER_EARLY_STOP: "1"
+  VLLM_DSV4_B12X_COMPRESSED_MLA: "0"
+  VLLM_DSV4_DSPARK_DEFER_TARGET_CAPTURE: "0"
+  VLLM_DSV4_DSPARK_DEFER_TARGET_CAPTURE_EXACT: "0"
   # Long-context crash fix kill-switch: clamp stale DSpark draft-KV slot ids.
+  DSPARK_SLOT_CLAMP: "1"
   # --- toolchain / JIT (GB10 is sm_121; arch list per upstream) ---
   TORCH_CUDA_ARCH_LIST: "12.1a"
   FLASHINFER_CUDA_ARCH_LIST: "12.1a"
@@ -214,9 +226,7 @@ env:
   TILELANG_CLEANUP_TEMP_FILES: "1"
   DG_JIT_USE_NVRTC: "0"
   DG_JIT_NVCC_COMPILER: /opt/env/bin/nvcc
-  # OffloadingConnector registers KV buffers; an expandable-segments VMM remap
-  # would invalidate them, so vLLM rejects that combination outright.
-  PYTORCH_CUDA_ALLOC_CONF: garbage_collection_threshold:0.9
+  PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
   # --- NCCL extras not covered by sparkrun's per-host IB auto-detection ---
   NCCL_CUMEM_ENABLE: "0"
   NCCL_NVLS_ENABLE: "0"
@@ -323,7 +333,6 @@ command: |
     --long-prefill-token-threshold {long_prefill_token_threshold} \
     --max-num-partial-prefills 1 \
     --speculative-config '{speculative_config}' \
-    --kv-transfer-config '{{"kv_connector": "OffloadingConnector", "kv_role": "kv_both", "kv_connector_extra_config": {{"spec_name": "TieringOffloadingSpec", "cpu_bytes_to_use": 2147483648, "eviction_policy": "lru", "secondary_tiers": [{{"type": "fs_python", "root_dir": "/kvspill", "n_read_threads": 16, "n_write_threads": 16}}]}}}}' \
     --tokenizer-mode {tokenizer_mode} \
     --distributed-executor-backend mp \
     --tool-call-parser {tool_call_parser} \

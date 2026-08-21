@@ -1,4 +1,4 @@
-# Spark Arena Leaderboard Push — Handoff
+# Spark Arena Leaderboard Push, Handoff
 
 Status doc for resuming the arena leaderboard work on 2x DGX Spark (GB10, sm_121a).
 Last updated: 2026-08-20.
@@ -105,31 +105,31 @@ fundamentally slower regime.
 32768, 65535, 100000] x concurrency[1, 2, 5, 10], 3 runs = 28 tasks.
 Runner: `uvx llama-benchy@0.4.0`. Submit via `uvx sparkrun arena benchmark run`.
 
-## UPDATE: a working b12x tag exists — Aug13 (2026081302)
+## UPDATE: a working b12x tag exists, Aug13 (2026081302)
 The ~28 submission (`sub1786675482641`) used **b12x tag `2026081302` (Aug13),
 NO DSpark (b12x-no-spec, fp8 KV, ray backend, safetensors), seqs=48**. That's why
-it completed — no DSpark = no `sample_tokens` deadlock. My "b12x exhausted" work
+it completed, no DSpark = no `sample_tokens` deadlock. My "b12x exhausted" work
 below was on `:latest` (Aug14, cudagraph-hang regression) and Aug10 (hung). **Aug13
 no-spec works.** The saved recipe is in `~/.cache/sparkrun/benchmarks/sub1786675482641/recipe.yaml`.
 
 **Submission in progress (2026-08-15):** retuned that recipe to **seqs=12** (from 48
-— sweep showed 48 wastes KV at the arena's c10 cap) → `~/b12x_tuned.yaml`, running
+,  sweep showed 48 wastes KV at the arena's c10 cap) → `~/b12x_tuned.yaml`, running
 `sparkrun arena benchmark run ~/b12x_tuned.yaml --cluster spark` (log `~/arena_submit.log`).
 Fast kernels + sweep insight → target > 28. If it beats the old ~28, that's the climb.
 
-**RESULT — SUBMITTED `sub1786864624365`, BEATS the old ~28.** Full 28-task run
+**RESULT, SUBMITTED `sub1786864624365`, BEATS the old ~28.** Full 28-task run
 completed (no crashes). Per-cell decode (tg128) head-to-head vs the ~28
 (`sub1786675482641`, seqs=48): **mine wins 24/28 cells**, ~11% higher aggregate on
 the 24 comparable cells (694 vs 628). Big wins at mid depths (65535×c2: 36.1 vs 6.1;
 16384×c5: 49.1 vs 33.0; 8192×c10: 60.1 vs 54.6). Deep 100K×c5/c10 crater in BOTH
-(~2.7-3.1 tok/s) — inherent to batched=16384 chunked-prefill starving decode, NOT a
+(~2.7-3.1 tok/s), inherent to batched=16384 chunked-prefill starving decode, NOT a
 differentiator. The seqs=12 sweep insight transferred cleanly to b12x. Exact
-leaderboard score is server-side (SPA, no fetchable API found — check
+leaderboard score is server-side (SPA, no fetchable API found, check
 spark-arena.com leaderboard in a browser).
 
 **Next tuning lever (bigger than seqs):** the deep×concurrent cells crater because
 `max_num_batched_tokens=16384` chunked prefill starves decode. Try LOWERING it (e.g.
-2048-4096) or disabling chunked prefill for the deep cells — could lift the 100K/65K
+2048-4096) or disabling chunked prefill for the deep cells, could lift the 100K/65K
 c5/c10 cells from ~3 to much higher and materially raise the score. Test on Aug13
 (or the Aug15 tag).
 
@@ -153,7 +153,7 @@ probe cells (local sweepbench, decode tok/s):
 - **SUBMITTED `sub1786984071986`** (Aug15 + seqs=12 + batched=8192). Beats prior
   `sub1786864624365` (Aug13/16384) by **+14% aggregate decode** (791 vs 694 tg-sum).
   Cratered cells recovered: 16384c10 15->63, 32768c5 12->48, 100000c2 4.8->32.
-  Small dip at shallow c1/c2 (~1-4 tok/s, smaller prefill chunks) — net strongly +.
+  Small dip at shallow c1/c2 (~1-4 tok/s, smaller prefill chunks), net strongly +.
   Very deepest concurrent (100K c5/c10, 65K c10) stay ~3-5 (KV-bound: only ~4 of 10
   100K-contexts fit at gpu_util=0.86 fp8).
 
@@ -167,13 +167,13 @@ probe cells (local sweepbench, decode tok/s):
 Net ~25%+ over the original ~28 baseline on aggregate decode. Check actual leaderboard
 rank at spark-arena.com (score is server-side, no fetchable API).
 
-## TOP LEADERBOARD RECIPE (adopt this) — `anemll/dspark-vllm-gx10:0.1.1`
+## TOP LEADERBOARD RECIPE (adopt this), `anemll/dspark-vllm-gx10:0.1.1`
 The current #1 uses a DIFFERENT, purpose-built image (not eugr-b12x). Recipe saved at
 `~/anemll_top.yaml`. Why it wins vs our eugr path:
-- **`mods: []`** — DSpark draft-loader baked in, NO pre_exec hook / trust gate.
-- **DSpark WORKS** on it (fixes the `sample_tokens` deadlock that broke eugr DSpark) —
+- **`mods: []`**: DSpark draft-loader baked in, NO pre_exec hook / trust gate.
+- **DSpark WORKS** on it (fixes the `sample_tokens` deadlock that broke eugr DSpark) , 
   DSpark ~2x decode on the healthy cells.
-- **`--no-scheduler-reserve-full-isl`** — scheduler doesn't reserve full input-seq-len
+- **`--no-scheduler-reserve-full-isl`**: scheduler doesn't reserve full input-seq-len
   KV up front → more requests fit at deep context → fixes our deep-cell cratering
   (our 100K×c10 = ~3 tok/s problem).
 - **`--kv-cache-dtype nvfp4_ds_mla`** (not fp8) → ~2x KV capacity.
@@ -186,11 +186,11 @@ The current #1 uses a DIFFERENT, purpose-built image (not eugr-b12x). Recipe sav
   then submit. To BEAT it, layer our batched/gpu_util insights on top.
 
 ### Getting the anemll image to run via sparkrun (gotchas, SOLVED)
-1. **No `ray` in the image** — recipe says `--distributed-executor-backend ray` but the
+1. **No `ray` in the image**: recipe says `--distributed-executor-backend ray` but the
    image has no ray module/CLI. Fix: change to `--distributed-executor-backend mp` so
    sparkrun picks the **vllm-distributed** runtime (native --nnodes multi-node, no ray).
    (Aligns with "use vllm-distributed for everything.")
-2. **`ENTRYPOINT [vllm serve]`** — sparkrun appends its own command (serve or the
+2. **`ENTRYPOINT [vllm serve]`**: sparkrun appends its own command (serve or the
    base64 `printf|bash` keepalive) to the entrypoint, so `vllm serve` swallowed it and
    args misaligned (`--compilation-config` got `'printf %s ...|bash'` → json_invalid).
    Fix: derived image **`anemll-noentry:latest`** (`FROM anemll...; ENTRYPOINT []`),
@@ -199,7 +199,7 @@ The current #1 uses a DIFFERENT, purpose-built image (not eugr-b12x). Recipe sav
 3. After both fixes it launches via vllm-distributed, loads main + DSpark draft models,
    and JIT-compiles FlashInfer/b12x/TileLang kernels (SLOW first time ~15-20min, cached
    after). Recipe now `recipe_version: '2'`.
-4. **DO NOT single-node probe the full model** — TP=1 tries to load ~156GB on a 121GB
+4. **DO NOT single-node probe the full model**: TP=1 tries to load ~156GB on a 121GB
    node → OOM-thrashes the box for ~10min (sshd unresponsive). 2-node (78GB/node) is fine.
 
 ### BLOCKER (unresolved): anemll kernel JIT HANGS on our GB10
@@ -210,15 +210,15 @@ creation stalls, and it never reaches health (waited 25-60min). Removing
 `--enable-flashinfer-autotune` did NOT help (the TileLang JIT itself stalls, not just
 the flashinfer autotune). The worker process is `R` (killable, not D-state) but holds
 ~100GB + GPU until killed. The #1 submitter ran this exact image on 2x GB10, so it CAN
-work — this looks like a **toolchain/firmware mismatch** (TileLang/nvcc/driver version
+work, this looks like a **toolchain/firmware mismatch** (TileLang/nvcc/driver version
 vs theirs) we couldn't compile past. Untried ideas: `DG_JIT_USE_NVRTC=1` (recipe sets
 0), a persistent/pre-warmed TileLang cache mounted into the container, a different
 anemll tag, or asking the author what driver/JIT setup they used.
 
-## DSpark on the WORKING eugr image — also blocked (2026-08-18)
+## DSpark on the WORKING eugr image, also blocked (2026-08-18)
 Tried eugr b12x **Aug15 + DSpark** (official b12x-dspark recipe → Aug15 tag, seqs=12,
 batched=8192, the draft-loader hook + `--speculative-config`). It loads main+draft
-models and compiles (no TileLang hang — b12x kernels), BUT **hangs in cudagraph
+models and compiles (no TileLang hang, b12x kernels), BUT **hangs in cudagraph
 capture** during warmup: 39min+ still "Capturing CUDA graphs (PIECEWISE): 100%"
 cycling, no `init engine`/`Application startup`, GPU pinned 96%, never healthy.
 So DSpark fails THREE distinct ways on our GB10:
@@ -238,12 +238,12 @@ The #1 anemll image (`ghcr.io/anemll/dspark-vllm-gx10:0.1.1`) is documented in:
 - **hazyumps/deepseek-v4-flash-gb10** (working DSpark, NCCL 2.30.4/RDMA, 40-60 tok/s decode)
 - anemll on X (status 2077271758768583051): vLLM 0.25.1 overlay; notes the sparse-MLA
   warmup is gated to backends that EXCLUDE GB10's SPARSE_MLA_SM120, so kernels JIT
-  mid-inference — anemll's overlay warms them at startup instead.
+  mid-inference, anemll's overlay warms them at startup instead.
 
 **Our RoCE hardware matches MiaAI-Lab exactly**: HCA `rocep1s0f1`, fabric iface
 `enp1s0f1np1` (10.0.1.1 head / 10.0.1.2 worker). Added `NCCL_IB_HCA=rocep1s0f1` +
 `NCCL_SOCKET_IFNAME=enp1s0f1np1` to `~/anemll_top.yaml` env. **It did NOT fix the
-TileLang JIT hang** — rank-0 (spark1) still spins compiling TileLang (GPU 96%, CPU 88%,
+TileLang JIT hang**: rank-0 (spark1) still spins compiling TileLang (GPU 96%, CPU 88%,
 cache static, log frozen), rank-1 (spark2) idle. Since the eugr B12X image reaches
 health on this SAME sparkrun networking (our +25% submission), the hang is
 **image/toolchain-specific (TileLang 0.1.9 on our GB10), not a networking gap**.
@@ -275,10 +275,10 @@ TileLang kernel cache from a working node and mount it.
 newer than the Aug14 `:latest` that regressed). If fixed, they're the cleanest path
 (official image, NO sparkrun patches needed, and may re-enable DSpark for a higher
 score). Retune to seqs=12 too. Verify no `sample_tokens` deadlock (DSpark) / cudagraph
-hang (no-spec) before trusting. Do NOT `sparkrun update` — it wipes the registry.py /
+hang (no-spec) before trusting. Do NOT `sparkrun update`: it wipes the registry.py /
 hooks.py patches (only needed for the DSpark/pull paths anyway).
 
-## b12x fast path — EXHAUSTED on :latest/Aug10 (why the arena number was stuck at ~28)
+## b12x fast path, EXHAUSTED on :latest/Aug10 (why the arena number was stuck at ~28)
 
 b12x = eugr's faster kernel set (`ghcr.io/spark-arena/dgx-vllm-eugr-nightly-b12x`),
 the only route to the 300+ tok/s arena numbers. Every lever tested on a CLEAN
@@ -299,7 +299,7 @@ The one older tag pulled (Aug10) has a different fatal bug on this hardware.
 
 **Best next b12x bet when resuming**: bisect nightly tags between Aug 5 and Aug 14
 (`ghcr` tags list below) for eugr's exact working build; OR just wait for a fixed
-nightly — all sparkrun patches are already in place so the official recipe should
+nightly, all sparkrun patches are already in place so the official recipe should
 then work unmodified.
 
 Available b12x tags (as of Aug15): 20260805..20260814 dailies plus NN suffixes
@@ -312,16 +312,16 @@ curl -s -H "Authorization: Bearer $T" https://ghcr.io/v2/spark-arena/dgx-vllm-eu
 ## sparkrun patches applied (needed to run b12x official recipe at all)
 
 All under `~/.local/share/uv/tools/sparkrun/lib/python3.12/site-packages/sparkrun/`
-with `.bak`/`.orig` backups. A `uv tool upgrade sparkrun` will wipe these — re-apply.
+with `.bak`/`.orig` backups. A `uv tool upgrade sparkrun` will wipe these, re-apply.
 
-1. `containers/registry.py` — `pull_image` now bounds non-critical (`required=False`)
+1. `containers/registry.py`: `pull_image` now bounds non-critical (`required=False`)
    `docker pull` to 90s. Without this, the opportunistic `:latest` refresh hangs
    forever on ghcr even though the 23GB image is already present. Marker:
    `SPARKRUN_NONCRITICAL_PULL_TIMEOUT`.
-2. `orchestration/hooks.py` — `_confirm_hook_execution` auto-approves pre_exec
+2. `orchestration/hooks.py`: `_confirm_hook_execution` auto-approves pre_exec
    hooks when stdin is not a TTY (nohup/pipe) instead of raising. Marker:
    `SPARKRUN_AUTOTRUST_NONTTY`. (There is no `--trust` flag on `arena benchmark run`.)
-3. `scripts/image_distribute.sh` — added a present-image skip (largely superseded
+3. `scripts/image_distribute.sh`: added a present-image skip (largely superseded
    by distribute.py's own identity check; harmless).
 
 Patch scripts saved at `/tmp/patch_registry.py`, `/tmp/patch_hooks.py` on spark1
@@ -337,7 +337,7 @@ Patch scripts saved at `/tmp/patch_registry.py`, `/tmp/patch_hooks.py` on spark1
   the GPU and holds the torch TCPStore port -> every subsequent launch fails with
   `DistStoreError: Timed out`. Always verify spark2 clean:
   `ssh spark2 'docker ps -aq --filter name=sparkrun; pgrep -af "vllm serve"'`.
-- **GB10 unified memory**: `nvidia-smi --query-gpu=memory.used` reports `[N/A]` —
+- **GB10 unified memory**: `nvidia-smi --query-gpu=memory.used` reports `[N/A]` , 
   that is normal, not a driver fault. Use `utilization.gpu` (0% = idle).
 - **Serve command uses full path** `/opt/env/bin/vllm` in the tonyd2wild recipe;
   do not override PATH (it strips `kill`/`procps`).
@@ -350,8 +350,8 @@ Patch scripts saved at `/tmp/patch_registry.py`, `/tmp/patch_hooks.py` on spark1
 
 ## Completing submissions (the reliable ceiling)
 
-- `sub1786675482641` — fp8 vanilla, ~28. Least-hacky (clean official vllm-ray recipe).
-- `sub1786712871763` — nvfp4 (tonyd2wild image, DSpark off), ~25.
+- `sub1786675482641`: fp8 vanilla, ~28. Least-hacky (clean official vllm-ray recipe).
+- `sub1786712871763`: nvfp4 (tonyd2wild image, DSpark off), ~25.
 
 fp8-vanilla beat nvfp4 for the arena, so **fp8 vanilla is the current best +
 least-hacky base for the sweep**.
@@ -389,7 +389,7 @@ least-hacky high-perf image, then submit the winner.
   - Hypothesis: arena caps concurrency at 10, so seqs>16 wastes KV and hurts deep
     cells; expect a lower seqs to win at depth.
 - PHASE 1 DONE (seqs sweep, gpu_util=0.80, nvfp4, DSpark off). Aggregate tok/s at
-  c10 (arena peak concurrency): **seqs=12 wins** across depths —
+  c10 (arena peak concurrency): **seqs=12 wins** across depths , 
   ctx0: 12=106.3, 16=93.2, 24=95.6, 32=94.1;
   ctx8192: 12=73.6, 16=67.2, 24=63.2, 32=69.0;
   ctx32768: 12=71.3, 16=70.3, 24=69.0, 32=69.4.
@@ -400,7 +400,7 @@ least-hacky high-perf image, then submit the winner.
   `~/phase2_driver.sh`, results `~/phase2_results.txt`.
 - PHASE 2 DONE (gpu_util sweep on seqs=12). gpu_util=0.82 completed (deep cells
   ~= 0.80, no gain: ctx32768 c10=64.9, ctx100000 c10=48.6). **gpu_util 0.86 and 0.90
-  HANG** (worker GPU 96% stuck 10min+, no NCCL error) — higher KV destabilizes this
+  HANG** (worker GPU 96% stuck 10min+, no NCCL error), higher KV destabilizes this
   stack. So gpu_util gives nothing; 0.80 is the stable best.
 - **WINNER: `max_num_seqs=12`, `gpu_util=0.80`, `kv=nvfp4_ds_mla`,
   `max_num_batched_tokens=8192`, DSpark OFF, standard-kernel tonyd2wild image.**
@@ -416,7 +416,7 @@ least-hacky high-perf image, then submit the winner.
   with the default compose + restart llama services when done (task #3).
 
 ### Follow-ups to review
-- **LMCache with `save_decode_cache`** — evaluate as a throughput/latency lever
+- **LMCache with `save_decode_cache`**: evaluate as a throughput/latency lever
   (KV offload + decode-cache reuse). Could help the arena's deep-context cells and
   production. Check vLLM LMCache connector integration + whether `save_decode_cache`
   is supported on this stack; measure at arena concurrencies.
@@ -427,7 +427,7 @@ least-hacky high-perf image, then submit the winner.
   crashes the vLLM worker (`ValueError: Free memory ... less than desired`), and
   (b) contend on the GPU/RoCE fabric so the 2-node worker **stalls spamming
   `NCCL WARN NET/IB`** and never becomes healthy. **Stopped both** (`docker stop`)
-  to free spark2 — must restore at teardown (task #3). After stopping, the serve
+  to free spark2, must restore at teardown (task #3). After stopping, the serve
   comes up healthy in ~5 min.
 - Use `gpu_util=0.80` (crash at 0.85; with services stopped there's headroom to try
   higher for more KV, but 0.80 is the safe baseline).
@@ -437,7 +437,7 @@ least-hacky high-perf image, then submit the winner.
 
 ## Teardown TODO (task #3, when fully done)
 Restore spark2's original services: `docker-llama-gen-1`, `docker-llama-embed-1`
-(STOPPED this session for the sweep — `docker start` them), `gpustack-worker`, and
+(STOPPED this session for the sweep, `docker start` them), `gpustack-worker`, and
 ASLR. Also restore `.env.dspark` from `.env.dspark.presweep` and remove
 `docker-compose.sweep.yml`. They were stopped to free spark2 for the 2-node arena work.
 
@@ -464,7 +464,7 @@ What makes it work (vs the paths that hung):
 Source of truth for the recipe: `MiaAI-Lab/DeepSeek-v4-Flash-DSpark-2x-DGX-Spark`
 (`docs/SETUP.md`, `.env.dspark.example`, `patches/`). The canonical DSpark
 checkpoint there is `deepseek-ai/DeepSeek-V4-Flash-DSpark`; the local prod .env
-serves `apetersson/DeepSeek-V4-Flash-0731-Abliterated-FP8` (abliterated — fine for
+serves `apetersson/DeepSeek-V4-Flash-0731-Abliterated-FP8` (abliterated, fine for
 speed testing, NOT for a leaderboard submission).
 
 **DSpark spec decode confirmed live**: mean acceptance length 2.86-3.82 (of gamma=5),
@@ -480,11 +480,11 @@ Speculative-decode tradeoff (proxy numbers, direction only): loses at
 shallow-context + high-concurrency (throughput-bound, batching wins), wins ~2x+ at
 deep context (latency/memory-bound). Since the no-spec arena score (38.57) was
 dragged down by the deep-context cells, DSpark's deep-cell strength plausibly raises
-the mean — being validated now with `llama-benchy` (real methodology) against the
+the mean, being validated now with `llama-benchy` (real methodology) against the
 live serve.
 
 ### Submission plan (if benchy confirms a win)
-- `sparkrun arena benchmark run` takes a RECIPE_NAME (no external-endpoint option) —
+- `sparkrun arena benchmark run` takes a RECIPE_NAME (no external-endpoint option) , 
   it launches, serves, benchmarks, and submits. So a DSpark submission needs a
   sparkrun recipe reproducing the compose: image `vllm-dspark-runtime:dspark-nvfp4-stage-c`,
   `method:dspark`, the DSpark env, KV `nvfp4_ds_mla`, TP=2, vllm-distributed.
@@ -508,7 +508,7 @@ arena uses) and compared against the arena's own saved no-spec runs. The optimis
   (`--book-url`), so there is NO sharing -> those cells COLLAPSE for everyone. The
   arena's own no-spec runs show it: 16384c10=15, 32768c5=12, 65535c10=4.2, 100000c10=2.7.
   The "no-spec sweepbench mean 38.0 ~= arena 38.57" match was coincidental.
-- **The decisive metric is c1 (single-stream) decode** — cache-independent for the tg
+- **The decisive metric is c1 (single-stream) decode**: cache-independent for the tg
   phase. Arena no-spec c1 ~= 28 tok/s flat across depth. DSpark (abliterated-0731) c1
   ~= 26. **No speculative speedup on this stack.** DSpark spec metrics are live
   (acceptance length 2.86 of gamma=5, 37-56% draft accept) but the draft+verify overhead
@@ -526,7 +526,7 @@ for all). The purpose-built checkpoint is NOT cached (156 GB download).
 ### Two remaining paths to actually beat +25% (both need a user go-ahead; large/uncertain)
 1. **`RedHatAI/DeepSeek-V4-Flash-speculator.dflash`** (cached, small; arch `DFlashDraftModel`,
    `speculators_model_type: dflash`) wired as a separate draft to the **legit -0731** base
-   via vLLM speculators. Cheapest to try, legit + submittable — BUT unclear if the bjk110
+   via vLLM speculators. Cheapest to try, legit + submittable, BUT unclear if the bjk110
    DSpark integration accepts a separate speculators-format draft (it expects a baked MTP
    head). Needs a config spike.
 2. **Download `deepseek-ai/DeepSeek-V4-Flash-DSpark`** (156 GB, hours) and run the exact
@@ -534,12 +534,12 @@ for all). The purpose-built checkpoint is NOT cached (156 GB download).
 
 **Bottom line:** the standing `sub1786984071986` (+~25% no-spec, 38.57 decode) remains the
 best VALIDATED arena result on these nodes. DSpark is real and running, but needs the
-right draft/checkpoint to pay off — a bounded next experiment (path 1), not a wall.
+right draft/checkpoint to pay off, a bounded next experiment (path 1), not a wall.
 
 ## Legit -0731 DSpark test (2026-08-18): abliteration was NOT the cause
 
 Swapped the serve to the **legit `deepseek-ai/DeepSeek-V4-Flash-0731`** (cached, submittable)
-and re-measured. Result: acceptance is even LOWER than the abliterated variant — mean
+and re-measured. Result: acceptance is even LOWER than the abliterated variant, mean
 acceptance length **2.26-2.49** (of gamma=5), draft accept **25-30%** (abliterated was 2.86 /
 37-56%). So the abliteration mismatch was not the problem; the `-0731` MTP head (`num_nextn_predict_layers=1`)
 just under-drafts.
@@ -553,7 +553,7 @@ over the +25% no-spec submission's mean, and risky to submit (could score below 
 the purpose-built **`deepseek-ai/DeepSeek-V4-Flash-DSpark`** checkpoint (156 GB download,
 not cached). Everything runnable on the current cache has been measured. The standing
 `sub1786984071986` (+~25%, 38.57 decode) is the best VALIDATED result; beating it is gated
-on that download + a public-leaderboard submission — both user decisions.
+on that download + a public-leaderboard submission, both user decisions.
 
 ## The checkpoint is NOT the gap; the spec-path KERNELS are (2026-08-18, definitive)
 
@@ -570,7 +570,7 @@ single-stream decode, arena no-spec c1 baseline ~28):
 
 **Diagnosis (quantified):** with acceptance length L=3 you expect ~3x fewer target
 forwards. Observed speedup ~= 33/28 = **1.18x**. Solving 3*C_target/(C_draft+C_verify)=1.18
-gives draft+verify ~= **2.5x C_target** — the DSpark draft+verify path on THIS build is too
+gives draft+verify ~= **2.5x C_target**: the DSpark draft+verify path on THIS build is too
 expensive, so the acceptance gain is eaten by overhead. The reference's 2x implies their
 spec path costs ~1.5x C_target: a **kernel/build efficiency** difference in their patched
 vLLM (rafaelcaricio/vllm fork + MiaAI-Lab hotfixes + b12x spec kernels), NOT draft quality,
@@ -578,7 +578,7 @@ acceptance, checkpoint, or KV dtype.
 
 Implication: the `RedHatAI/...speculator.dflash` draft (cached) would change draft quality,
 not the kernel overhead, so it is predicted low-value. The real remaining path is to
-**build their exact patched vLLM from source** (their repos) and run it — a substantial
+**build their exact patched vLLM from source** (their repos) and run it, a substantial
 effort, not a config tweak. That is the only untested route to the reference's 2x, and it is
 a user-gated engineering task.
 
@@ -605,15 +605,15 @@ concurrency-weighted 1:1:1:1 across c[1,2,5,10], so the three throughput levels 
 single-stream win. Mechanism: DSpark collapses the instant there is BOTH concurrency AND
 context (c5 = 51.9 at ctx0 -> 29.8 at ctx4096, a cliff) because each request's draft+verify
 starves the batch. This is the "ragged path" the reference's `keys-concurrency.patch`
-(baked at image-build) fixes — our `dspark-nvfp4-stage-c` image does NOT have it.
+(baked at image-build) fixes, our `dspark-nvfp4-stage-c` image does NOT have it.
 
 **Conclusion:** For the arena's concurrency-weighted profile, no-spec is not just the best
-runnable config — it is the best APPROACH. Speculative decode optimizes single-stream latency
+runnable config, it is the best APPROACH. Speculative decode optimizes single-stream latency
 at the cost of aggregate throughput, and the arena rewards throughput 3:1. `sub1786984071986`
 (+~25%, 38.57 decode) is the validated ceiling. The only path that could beat it is rebuilding
 vLLM with the concurrency patch (so DSpark stops collapsing at c>1) AND that would at best yield
 a modest gain, since DSpark clearly wins only the c1 column. That is a real from-source build
-effort, user-gated, with uncertain payoff — not a config tweak. Everything config-level is
+effort, user-gated, with uncertain payoff, not a config tweak. Everything config-level is
 exhausted and measured.
 
 ## BREAKTHROUGH (2026-08-19): the concurrency collapse was decode-lane STARVATION, fixed by a config flag
@@ -709,7 +709,7 @@ reached "Step 2/3: Running benchmark". (TODO cleanup: the root-owned stale dirs 
 Submission #3 in flight: bench_fa2b966bcfb4, recipe deepseek-v4-flash-0731-dspark-arena-threshold.yaml,
 log ~/arena_submit3.log. Awaiting the arena's computed decode score vs the standing 38.57.
 
-## RESULT: DSpark+threshold submitted and WINS (2026-08-19) — sub1787103944859
+## RESULT: DSpark+threshold submitted and WINS (2026-08-19), sub1787103944859
 
 Submission `sub1787103944859` completed (SUBMIT_EXIT 0) and uploaded. Full 28-cell arena
 decode, both measured by the arena's own runs=3/cache-on benchmark (apples-to-apples):
@@ -739,8 +739,8 @@ ghcr tag scan:
   latest. No-spec b12x path; secondary (our DSpark already beats no-spec).
 - anemll/dspark-vllm-gx10: only 0.1.0/0.1.1 (nothing newer; 0.1.1 still TileLang-hangs on GB10).
 - **bjk110/vllm-spark: many newer tags. PRIME CANDIDATE:
-  `v027-ngc2607-dsv4-0731-dspark-k7-256k-production`** — "native-dspark-k7" (k=7 support, which
-  our stage-c vLLM 0.21 cannot run — recipe says k=7 crashes old runtime; DeepSeek model card
+  `v027-ngc2607-dsv4-0731-dspark-k7-256k-production`**: "native-dspark-k7" (k=7 support, which
+  our stage-c vLLM 0.21 cannot run, recipe says k=7 crashes old runtime; DeepSeek model card
   recommends k=7 => higher acceptance => faster), newer NGC 2026.07 base, 256k ctx, likely newer
   vLLM whose scheduler ENFORCES max_num_partial_prefills (the exact fix for our c10 weak column).
   Also v025-native-dspark-k7, v023-dsv4-deepgemm-indexer-prod.
@@ -748,9 +748,9 @@ Pulling v027 to both nodes to test. "native-dspark" suggests DSpark is baked in 
 tonyd2wild pre_exec overlay). Plan: inspect entrypoint/vllm-version/dspark modules, adapt recipe
 (k=7 + threshold + 7 cache redirects), serve+benchmark, submit if it beats ~40.5.
 
-## v027 image: KERNEL WALL on DSV4 sparse prefill (2026-08-19) — record stands
+## v027 image: KERNEL WALL on DSV4 sparse prefill (2026-08-19), record stands
 Tried `bjk110/vllm-spark:v027-ngc2607-dsv4-0731-dspark-k7-256k-production` (vLLM 0.27.1, native
-DSpark `dflash`, scheduler ENFORCES max_num_partial_prefills — the c10 fix). Built a v027 recipe
+DSpark `dflash`, scheduler ENFORCES max_num_partial_prefills, the c10 fix). Built a v027 recipe
 and iterated through FIVE config incompatibilities:
 1. `--max-num-partial-prefills` flag removed in 0.27 -> dropped it (scheduler enforces via default).
 2. `DG_JIT_NVCC_COMPILER=/opt/env/bin/nvcc` (stage-c path) dead -> set `/usr/local/cuda/bin/nvcc`.
@@ -769,9 +769,9 @@ sparse-prefill path for GB10; our WORKING stack is vLLM 0.21 stage-c. eugr Aug17
 b12x (structurally cannot beat DSpark). anemll unchanged (0.1.1, TileLang hang). So no new image
 beats the record on this hardware. **`sub1787103944859` (DSpark+threshold, ~40.5) remains the best.**
 Remaining long-shot: `v023-dsv4-72261a7-sm121-deepgemm-indexer-prod` (sm121-specific) MIGHT route
-DSV4 prefill differently — untested, another 37GB pull + config iteration, uncertain.
+DSV4 prefill differently, untested, another 37GB pull + config iteration, uncertain.
 
-## v023 image also blocked (2026-08-19) — record still stands
+## v023 image also blocked (2026-08-19), record still stands
 `v023-dsv4-72261a7-sm121-deepgemm-indexer-prod` (vLLM 0.24, dsv4 PR41834, sm121). 5 serve attempts:
 1. method `dspark` invalid in 0.24 (choices include `dflash`, `mtp`, `deepseek_mtp`).
 2. `dflash` needs a separate draft model ("num_speculative_tokens without speculative model").
@@ -780,12 +780,12 @@ DSV4 prefill differently — untested, another 37GB pull + config iteration, unc
    `model.layers.43.mtp_block.*`. Hard checkpoint-vs-loader naming mismatch.
 4. `dflash` + external draft `RedHatAI/DeepSeek-V4-Flash-speculator.dflash` (DFlashDraftModel, on both
    nodes) -> sparkrun "Model distribution failed: permission denied on spark2" (rsync can't set times
-   on the ROOT-OWNED speculator dir — same docker-compose-as-root cache pollution).
+   on the ROOT-OWNED speculator dir, same docker-compose-as-root cache pollution).
 5. Draft by local snapshot path -> "local model download failed" (sparkrun still tries to distribute).
 
 Never reached KV profiling, so v023's sparse-MLA prefill viability is UNTESTED (it shares
 flashmla_sparse.py block-size [64] with v027, so likely the same wall). BLOCKERS: (a) checkpoint MTP
-naming (code-level), (b) draft-model distribution blocked by root-owned ~/.cache/huggingface dirs —
+naming (code-level), (b) draft-model distribution blocked by root-owned ~/.cache/huggingface dirs , 
 needs `sudo chown -R maci ~/.cache/huggingface` on BOTH nodes (no passwordless sudo available to the
 agent). Only after that can the dflash path be tested.
 
@@ -793,12 +793,12 @@ NET across all new images: v027 kernel wall, v023 double-blocked, eugr Aug17/18 
 DSpark), anemll unchanged. **`sub1787103944859` (DSpark+threshold, ~40.5) remains the record.** The
 one remaining lever needs the user's sudo to clear the root-owned cache pollution, then re-run v023.
 
-## FINAL: both new images blocked by fundamental walls (2026-08-19) — record stands
+## FINAL: both new images blocked by fundamental walls (2026-08-19), record stands
 v023 got much further than v027 (10 serve attempts). Cleared every blocker EXCEPT the last:
 - Distribution of the dflash draft blocked by root-owned HF cache (hub/ root-owned on both nodes,
   no sudo). BYPASSED by (a) patching sparkrun rsync `--omit-dir-times --no-perms`, (b) forcing
   skip_fan_out, and finally (c) hardcoding speculative_config into the command + removing it from
-  `defaults` so sparkrun never scans/distributes the draft — vLLM loads it from the readable cache.
+  `defaults` so sparkrun never scans/distributes the draft, vLLM loads it from the readable cache.
 - Then: dflash draft (DFlashQwen3Model, NON-MLA, head_size=256, non-causal) has no attention backend
   for `fp8_ds_mla` KV; the DSV4 MLA main model's FlashMLA "only supports fp8 kv-cache" (rejects auto).
   vLLM applies ONE global kv_cache_dtype (fp8 -> promoted to fp8_ds_mla for DSV4) to BOTH models, and
@@ -808,10 +808,10 @@ v023 got much further than v027 (10 serve attempts). Cleared every blocker EXCEP
 
 NET: v027 = compiled-kernel wall; v023 = KV-dtype architectural wall (+ MTP naming). Neither new image
 can run DSV4 speculation on our GB10. sparkrun patches applied: .bak_omitdirtimes (ssh.py),
-.bak_skipfanout (distribute.py) — REVERT if they cause issues on normal runs. Record unchanged:
+.bak_skipfanout (distribute.py), REVERT if they cause issues on normal runs. Record unchanged:
 **sub1787103944859 (DSpark+threshold, ~40.5)** on the working stage-c image is the best achievable.
 
-## BREAKTHROUGH: v025 BOOTS on GB10 (2026-08-19) — the new image that works
+## BREAKTHROUGH: v025 BOOTS on GB10 (2026-08-19), the new image that works
 `v025-native-dspark-k7-promotion-candidate-85deaf7` (vLLM 0.25.0) REACHED HEALTH with the v027
 recipe config UNCHANGED (method:dspark native MTP, k=7, kv fp8_ds_mla, max_model_len 131072,
 nvcc=/usr/local/cuda/bin/nvcc). It CLEARED the sparse-MLA prefill wall that killed v027 (passed
@@ -822,22 +822,22 @@ Recipe: ~/tonyd2wild/sparkrun/deepseek-v4-flash-0731-dspark-v025-k7.yaml
 Running the full 28-cell arena grid now (k=7) to compare vs the record (raw-mean 36.75 / ~40.5).
 If k=7 acceptance beats k=3, this could set a new record.
 
-## v025 measured: boots but ~7% SLOWER than the record (2026-08-19) — record confirmed best
+## v025 measured: boots but ~7% SLOWER than the record (2026-08-19), record confirmed best
 v025 is the ONLY new image that runs DSV4 speculation on GB10. Full 28-cell arena grid
 (my methodology, cache-off runs=1):
 - v025 k=7: MEAN 30.52 (k=7 wastes draft compute on low-acceptance MTP; below even no-spec).
 - v025 k=3: MEAN 36.92 (+21% over k=7). vs record k=3 grid 39.77 = **-7.2%**.
   Per-column: c1 34.6 vs 35.4 (~tie), c2 37.6 vs 42.8 (-12%), c5 43.1 vs 48.0 (-10%), c10 ~tie.
-  v025 loses at moderate concurrency (c2/c5) — KV-capacity/kernel efficiency; gpu_mem was 0.78.
+  v025 loses at moderate concurrency (c2/c5), KV-capacity/kernel efficiency; gpu_mem was 0.78.
 v025 k=3 grid (36.92, cache-off) ~= record's ARENA raw-mean (36.75), but grid-to-grid v025 < record,
 and applying the record's ~8% grid->arena haircut, v025 would score ~34 arena < record 36.75. So v025
 would NOT beat the record on the leaderboard.
 
 ## FINAL VERDICT (2026-08-19): no new image beats the record
-- v027 (0.27): compiled sparse-MLA prefill kernel wall — does not boot.
-- v023 (0.24): dflash draft KV-dtype conflict + MTP naming — does not boot for spec.
+- v027 (0.27): compiled sparse-MLA prefill kernel wall, does not boot.
+- v023 (0.24): dflash draft KV-dtype conflict + MTP naming, does not boot for spec.
 - v025 (0.25): BOOTS, best config (k=3) measured -7.2% below the record.
-- eugr Aug17/18: no-spec b12x — cannot beat DSpark.
+- eugr Aug17/18: no-spec b12x, cannot beat DSpark.
 - anemll: nothing newer (0.1.1 TileLang hang).
 **Record stands: sub1787103944859 (stage-c vLLM 0.21, DSpark k=3 + --long-prefill-token-threshold 1024,
 ~40.5).** The stage-c 0.21 build is genuinely the most efficient DSV4 DSpark path on our GB10; the newer
@@ -852,7 +852,7 @@ while worker captures). Impractical. Also hit 2 transient 2-node rendezvous time
 1/2 clients) needing full container cleanup between tries. So v025's gpu_mem lever is a dead end; its
 best runnable config (0.78, k=3) = 36.92 (-7.2% vs record). CONFIRMED: no new image beats the record.
 
-## v025 c2/c5 gap is ARCHITECTURALLY unfixable (2026-08-19) — definitive close
+## v025 c2/c5 gap is ARCHITECTURALLY unfixable (2026-08-19), definitive close
 Root-caused v025's -7.2% (U-shape: ties c1/c10, loses c2/c5 by 10-12%): v025 (0.25) ENFORCES
 max_num_partial_prefills, default 1 (Field(default=1, ge=1)) -> only ONE request prefill-chunks at a
 time -> throttles c2/c5 prefill parallelism. The record's stage-c (0.21) allows concurrent partial
@@ -865,16 +865,16 @@ is architectural, not tunable. v025's best runnable config (k=3, gm 0.78, pp=1) 
 DEFINITIVE, root-caused: no new image beats sub1787103944859 on GB10. v027/v023 don't boot; v025
 boots but is architecturally capped ~7% slower. ~36 serve attempts total. Record is the ceiling.
 
-## BREAKTHROUGH 2: eugr Aug18 b12x + DSpark BOOTS (2026-08-19) — the fast-kernel DSpark path works now
+## BREAKTHROUGH 2: eugr Aug18 b12x + DSpark BOOTS (2026-08-19), the fast-kernel DSpark path works now
 The @official/deepseek-v4-flash-0731-b12x-dspark-vllm recipe (DSpark k=5 + B12X_MLA_SPARSE attention +
 instanttensor draft loader) HUNG on eugr Aug15 (2026081502) warmup. Re-ran it on the NEWER
 eugr Aug18 nightly (2026081802) + added --long-prefill-token-threshold 1024 -> REACHED HEALTH (~6 min,
 no hang). So the newer nightly FIXED the DSpark warmup deadlock. This is the b12x fast-kernel DSpark
 path (different from the stage-c record). Recipe: ~/tonyd2wild/sparkrun/official-dspark-eugr18.yaml
-(container -> 2026081802, threshold added). Benchmarking the full arena grid now — if b12x kernels
+(container -> 2026081802, threshold added). Benchmarking the full arena grid now, if b12x kernels
 beat stage-c, this sets a new record.
 
-## eugr Aug18 b12x DSpark: catch-22 concurrency deadlock (2026-08-20) — fast-kernel path DEAD
+## eugr Aug18 b12x DSpark: catch-22 concurrency deadlock (2026-08-20), fast-kernel path DEAD
 Aug18 fixed the warmup hang, and eugr18 b12x DSpark reached health. BUT under concurrency the
 draft-sample path deadlocks: `TimeoutError: RPC call to sample_tokens timed out` -> EngineDeadError.
 10 (and 5) concurrent requests ALL time out; engine survives but serves nothing. The recipe already
@@ -913,7 +913,7 @@ b12x DSpark path works after all - do NOT add the threshold to the eugr b12x rec
 b12x-DSpark sample path; the threshold was for the DIFFERENT stage-c image). Recipe:
 ~/tonyd2wild/sparkrun/eugr18-pristine.yaml. Full arena grid running - if the fast kernels hold, NEW RECORD.
 
-## eugr18 b12x DSpark deadlock is inherent to LONG-CONTEXT concurrency (2026-08-20) — fast path DEAD for arena
+## eugr18 b12x DSpark deadlock is inherent to LONG-CONTEXT concurrency (2026-08-20), fast path DEAD for arena
 Isolated the sample_tokens deadlock precisely: pristine eugr18 (no threshold) survives LIGHT concurrency
 (8 concurrent SHORT context, ok 3.8-5.7s, single-stream ~58 tok/s = FAST) but HARD-deadlocks on
 LONG-CONTEXT concurrency: 10-conc long-ctx all FAIL, even the arena grid crashes (sample_tokens RPC
@@ -929,7 +929,7 @@ deadlock (unusable for arena). Record sub1787103944859 (stage-c 0.21 DSpark k=3 
 the only config that boots, survives long-context concurrency, AND is fast. Proven exhaustively.
 Note: 2-node RoCE rendezvous now flaky from ~49 restarts; box would benefit from a reset.
 
-## eugr18 no-chunked-prefill also fails (2026-08-20) — fast path levers fully exhausted
+## eugr18 no-chunked-prefill also fails (2026-08-20), fast path levers fully exhausted
 Tried disabling chunked prefill on eugr18 (max_model_len 131072, batched 131072, --no-enable-chunked-prefill)
 to remove mixed prefill+decode+spec batches (the suspected sample_tokens-deadlock trigger). It NEVER warms
 up (>14 min, GPU pinned, same impractical-huge-batch warmup wall v025 hit with no-chunk). So the mixed-batch
@@ -938,7 +938,7 @@ seqs=4 (deadlock), no-chunk (won't warm up). The b12x-DSpark long-context-concur
 fixable by any config available to me. FINAL: no new image beats the record; the fast one (eugr18) has a
 code-level deadlock, others don't boot or are slower. ~50 serve attempts. Record sub1787103944859 stands.
 
-## CORRECTION (2026-08-20): eugr18 was NOT deadlocking — it was the DEFAULT short model-timeout firing
+## CORRECTION (2026-08-20): eugr18 was NOT deadlocking, it was the DEFAULT short model-timeout firing
 Isolation with VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1800 VERIFIED in the container: eugr18 pristine
 single long-ctx = 3s (fast), 4-concurrent long-ctx = ALL ok ~3s (fast, no hang), health stays 200.
 The earlier "sample_tokens deadlock" was the DEFAULT (short) VLLM_EXECUTE_MODEL_TIMEOUT firing during
@@ -949,7 +949,7 @@ Running the full arena grid now (timeout=1800, prevents crashes) to get REAL num
 tok/s single) vs possibly slow c10. If the fast cells outweigh slow c10, this BEATS the record.
 Recipe: ~/tonyd2wild/sparkrun/eugr18-pristine.yaml (VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1800 is the key).
 
-## eugr18 FINAL: intermittent 2-node worker HANG on the grid (2026-08-20) — fast but unusable
+## eugr18 FINAL: intermittent 2-node worker HANG on the grid (2026-08-20), fast but unusable
 With timeout=1800, eugr18 survives isolated 4-concurrent long-ctx (3s, fast) but: 8-concurrent long-ctx
 is pathologically slow (>250s, doesn't crash), and the FULL arena grid HANGS - crash dump shows
 kv_cache_usage=0.01 (NOT OOM), a single spec-decode request hangs, cross-node shm_broadcast times out
@@ -958,7 +958,7 @@ spec-decode steps under the arena workload despite the timeout. Fast single-stre
 fundamentally unreliable for the arena. Not usable. The stage-c record does not have this hang.
 ABSOLUTE FINAL: ~52 serve attempts, 5 images; none beats the record. sub1787103944859 stands.
 
-## eugr18 ROOT CAUSE (2026-08-20): 2-node spec hang on MIXED (prefill+decode) batches — unavoidable for arena
+## eugr18 ROOT CAUSE (2026-08-20): 2-node spec hang on MIXED (prefill+decode) batches, unavoidable for arena
 Final isolation: eugr18 seqs=4 + timeout=1800, 10 concurrent (queues to 4-running) -> CRASH. But isolated
 EXACTLY-4-concurrent (no queue) -> ok 3s. The difference = QUEUING. With a queue, finished requests are
 replaced by prefilling ones -> MIXED prefill+decode+spec batches -> the 2-node spec-decode path hangs
@@ -967,9 +967,9 @@ batches are unavoidable, so eugr18 b12x DSpark hangs. No seq cap or timeout avoi
 This is the exact upstream bug to report: b12x-DSpark 2-node spec decode hangs on mixed prefill+decode batches.
 DEFINITIVE END: ~53 serve attempts, 5 images, none beats the record. sub1787103944859 is the ceiling.
 
-## eugr18 ABSOLUTE FINAL (2026-08-20): crashes at c10 across ALL configs — fast path definitively closed
+## eugr18 ABSOLUTE FINAL (2026-08-20): crashes at c10 across ALL configs, fast path definitively closed
 Every distinct lever exhausted for eugr18 b12x DSpark at 10-concurrent (the arena's c10, required):
-seqs=4/8/10, VLLM_EXECUTE_MODEL_TIMEOUT=1800, no-chunked-prefill, thinking=false/true — ALL crash/hang
+seqs=4/8/10, VLLM_EXECUTE_MODEL_TIMEOUT=1800, no-chunked-prefill, thinking=false/true, ALL crash/hang
 at 10-concurrent long-context (health->000). Fast at <=4 concurrent (3s), but the arena needs c10.
 The high-concurrency crash is fundamental to the b12x-DSpark 2-node spec path; no config fixes it.
 ~56 serve attempts across 5 images (v027/v023 no boot; v025 -7.2%; eugr18 crashes at c10; eugr no-spec/
@@ -980,7 +980,7 @@ is the only config that is fast, boots, AND survives the arena's full concurrenc
 Last untried lever: eugr18 b12x with DSpark REMOVED (no-spec) to dodge the spec-decode mixed-batch hang,
 keeping the fast b12x kernels + threshold=1024, seqs=12 (recipe eugr18-nospec.yaml). Two boots failed on a
 trailing-backslash arg bug (`unrecognized arguments: --nnodes 2`); fixed. Third boot (eugr18ns3.log): loaded
-weights + KV (21.17 GiB), then DEADLOCKED in CUDA-graph capture — frozen at PIECEWISE 9/11 (82%) for 10+ min,
+weights + KV (21.17 GiB), then DEADLOCKED in CUDA-graph capture, frozen at PIECEWISE 9/11 (82%) for 10+ min,
 GPU busy-spinning at 96% with zero forward progress (2-node collective deadlock: head waiting on stalled
 worker). Normal capture is ~6s. This is the degraded-box warmup hang, now recurring: after ~59 restart cycles
 the 2-node RoCE rendezvous + cudagraph capture is unreliable regardless of config. Killed it, force-removed
@@ -991,14 +991,14 @@ mixed-batch hang, eugr18-no-spec cudagraph deadlock). sub1787103944859 (stage-c 
 stands as the proven ceiling. Production restored to that same max-speed config on spark1:8000.
 Remaining offer (not done): upstream bug report to eugr/bjk110 on the b12x-DSpark 2-node mixed-batch spec hang.
 
-## Aug19 nightly tested (2026-08-20): SAME 2-node deadlock — fast path closed across ALL nightlies
+## Aug19 nightly tested (2026-08-20): SAME 2-node deadlock, fast path closed across ALL nightlies
 Checked ghcr for nightlies newer than 2026081802: found 2026081901 and 2026081902 (Aug 19). Pulled
 2026081902 on both nodes, recipe eugr19-dspark.yaml (= pristine DSpark k=5 + B12X_MLA_SPARSE + instanttensor
 draft, container bumped to Aug19). Boot got FURTHER than Aug18 no-spec (cleared PIECEWISE profiling 11/11,
 DSpark draft load OK) but then DEADLOCKED in FULL cudagraph capture at 2/10, and the engine log shows the
 smoking gun: `shm_broadcast.py:801 No available shared memory broadcast block found in 60 seconds` repeating
 every 60s (worker node hung, head can't broadcast). GPU busy-spins at 96%, zero progress. IDENTICAL cross-node
-shm_broadcast stall from Aug18 — Aug19 did NOT fix it. Conclusion: the b12x-DSpark path's 2-node collective
+shm_broadcast stall from Aug18, Aug19 did NOT fix it. Conclusion: the b12x-DSpark path's 2-node collective
 hang is a fundamental incompatibility with this RoCE setup, NOT a version-specific bug a newer nightly fixes.
 Aug18 hung at inference (c10 mixed batch); Aug19 hangs even earlier (FULL cudagraph capture). No Aug20 nightly
 exists yet. Killed, restored production. THE FAST PATH IS CLOSED across every available nightly.

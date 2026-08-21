@@ -7,13 +7,14 @@ the open gaps that upstream vLLM/SGLang still need to close for this model on th
 
 Scope is intentionally narrow: **this one checkpoint, this one hardware**. Not a general serving guide.
 
-- **[TEST_LOG.md](TEST_LOG.md)** — the full quant × framework × image sweep, every result, verbatim errors.
-- **[UPSTREAM_GAPS.md](UPSTREAM_GAPS.md)** — what's still broken/missing upstream, filed for maintainers.
-- **[CLIENT_INTEGRATION.md](CLIENT_INTEGRATION.md)** — OpenAI-compat harness setup (Kimi Code, the `reasoning` field gotcha).
-- **[MODEL_VARIANTS.md](MODEL_VARIANTS.md)** — which HF checkpoints fit this setup (abliterated FP8, REAP-pruned) + what to try next.
-- **[TUNING.md](TUNING.md)** — the util→KV-pool lever (and the 0.85 startup cliff), single-stream ceiling, content-driven DSpark.
-- **[TROUBLESHOOTING.md](TROUBLESHOOTING.md)** — symptom → cause → fix table for every failure hit here.
-- **[PROD_C5_SSD.md](PROD_C5_SSD.md)** — production config: 5 clients, **SSD KV offload** (works; UPSTREAM_GAPS #7 was too pessimistic), param minimization, node housekeeping. **Not yet serving:** its NVFP4 KV pool dies in warmup.
+- **[TEST_LOG.md](TEST_LOG.md)**: the full quant × framework × image sweep, every result, verbatim errors.
+- **[UPSTREAM_GAPS.md](UPSTREAM_GAPS.md)**: what's still broken/missing upstream, filed for maintainers.
+- **[CLIENT_INTEGRATION.md](CLIENT_INTEGRATION.md)**: OpenAI-compat harness setup (Kimi Code, the `reasoning` field gotcha).
+- **[MODEL_VARIANTS.md](MODEL_VARIANTS.md)**: which HF checkpoints fit this setup (abliterated FP8, REAP-pruned) + what to try next.
+- **[TUNING.md](TUNING.md)**: the util→KV-pool lever (and the 0.85 startup cliff), single-stream ceiling, content-driven DSpark.
+- **[TROUBLESHOOTING.md](TROUBLESHOOTING.md)**: symptom → cause → fix table for every failure hit here.
+- **[EUGR_B12X_PROD.md](EUGR_B12X_PROD.md)**: **the production path**: eugr b12x image, fp8_ds_mla KV, DSpark, 1.65M tokens, measured c1-c6. Includes why `nvfp4_ds_mla` is closed on this image.
+- **[PROD_C5_SSD.md](PROD_C5_SSD.md)**: production config: 5 clients, **SSD KV offload** (works; UPSTREAM_GAPS #7 was too pessimistic), param minimization, node housekeeping. **Not yet serving:** its NVFP4 KV pool dies in warmup.
 - **[examples/.env.dspark.example](examples/.env.dspark.example)** · **[scripts/clean-restart.sh](scripts/clean-restart.sh)** · **[scripts/bench.py](scripts/bench.py)**
 
 ## Topology
@@ -31,18 +32,19 @@ Scope is intentionally narrow: **this one checkpoint, this one hardware**. Not a
 
 ---
 
-## TL;DR: two configs that serve, one that does not yet
+## TL;DR: the shipped prod config, plus history
 
 | Goal | Framework / image | Quant | Ctx | Spec | Measured |
 |------|-------------------|-------|-----|------|----------|
 | **Max context (1M)** | vLLM, tonyd2wild `dspark-nvfp4-stage-c` (bjk110 base) | FP8 weights + **NVFP4 KV** | **1,048,576** | DSpark k5 | ~37-41 tok/s/stream @ c1-3; KV pools >1.5M allocate but have not reached serving |
 | **Max throughput (≤512K)** | vLLM, eugr `spark-vllm-b12x` | FP8 (UE8M0) | 512K | off | **~326 tok/s @ c48** |
+| **Prod, 3-5 sessions (SHIPPED)** | vLLM, eugr `dgx-vllm-eugr-nightly-b12x:2026081903` | FP8 weights + **fp8_ds_mla KV** | 1M | DSpark k=5 | **1,652,056-token KV, 140.3 tok/s agg @ c5**, b12x MoE, zero patches. See [EUGR_B12X_PROD.md](EUGR_B12X_PROD.md) |
 | **Prod, 5 clients + SSD KV spill** | vLLM, tonyd2wild `dspark-nvfp4-stage-c` | FP8 weights + **NVFP4 KV** | 1M | DSpark k=5 | ⚠️ **does not serve yet**: allocates a 2.23M-token pool, then the worker dies in warmup. SSD offload itself works. See [PROD_C5_SSD.md](PROD_C5_SSD.md) |
 
-Everything else is worse or broken on this hardware — see the matrix.
+Everything else is worse or broken on this hardware, see the matrix.
 
 **Hardware:** 2× GB10 (sm_121a, ~122 GB unified memory/node), 200 Gb/s RoCE (CX7) between nodes, TP=2.
-GPU clock capped at **2200 MHz** (proven zero throughput loss, prevents thermal shutdown — the box is
+GPU clock capped at **2200 MHz** (proven zero throughput loss, prevents thermal shutdown, the box is
 bandwidth-bound, not clock-bound).
 
 ---
@@ -50,7 +52,7 @@ bandwidth-bound, not clock-bound).
 ## The 1M recipe (NVFP4 KV + DSpark)
 
 The only path to 1M context is **NVFP4 KV cache** (`--kv-cache-dtype nvfp4_ds_mla`), which needs a
-DeepSeek-V4-specific padded-NVFP4 KV *writer* that **only exists in the tonyd2wild custom image** —
+DeepSeek-V4-specific padded-NVFP4 KV *writer* that **only exists in the tonyd2wild custom image** , 
 stock vLLM, eugr, and even the newer eugr-b12x all lack it (they have a GLM-only NVFP4-KV writer and
 a 432-byte envelope that mismatches DeepSeek's sparse-MLA page; see UPSTREAM_GAPS).
 
@@ -67,17 +69,17 @@ Key serve flags (via their `docker-compose.dspark.yml` + `.env.dspark`):
 --max-model-len 1048576
 --max-num-seqs 32                      # << aggregate-throughput lever: 6→32 lifts peak 159→421 tok/s, free at low concurrency (48 hangs on 2-node)
 --max-num-batched-tokens 8192
---gpu-memory-utilization 0.85          # << see "Tuning" — biggest lever for concurrent large sessions
+--gpu-memory-utilization 0.85          # << see "Tuning", biggest lever for concurrent large sessions
 --speculative-config '{"method":"dspark","num_speculative_tokens":5,"draft_sample_method":"probabilistic"}'
 --distributed-executor-backend mp --nnodes 2
 --tokenizer-mode deepseek_v4 --reasoning-parser deepseek_v4 --tool-call-parser deepseek_v4 --enable-auto-tool-choice
 ```
 
 Model: `deepseek-ai/DeepSeek-V4-Flash-0731` (official) or an FP8 abliterated variant
-(e.g. `apetersson/DeepSeek-V4-Flash-0731-Abliterated-FP8`) — **abliteration is speed-neutral**.
+(e.g. `apetersson/DeepSeek-V4-Flash-0731-Abliterated-FP8`), **abliteration is speed-neutral**.
 
 RoCE env (per node): `NCCL_IB_HCA`, `NCCL_SOCKET_IFNAME`, `NCCL_IB_GID_INDEX=3` (RoCE v2),
-`VLLM_HOST_IP=<this node's fabric IP>` (must be per-node — see gotchas).
+`VLLM_HOST_IP=<this node's fabric IP>` (must be per-node, see gotchas).
 
 ---
 
@@ -98,7 +100,7 @@ RoCE env (per node): `NCCL_IB_HCA`, `NCCL_SOCKET_IFNAME`, `NCCL_IB_GID_INDEX=3` 
   | 0.78 | 1,181,262 | 1.13× |
   | 0.85 | **2,769,487** | **2.64×** |
 
-  2.3× more KV capacity for a small util bump — the thing that matters for coding agents whose
+  2.3× more KV capacity for a small util bump, the thing that matters for coding agents whose
   sessions grow to 200-500K+ tokens. (Push higher with care: less capture/runtime headroom.)
 - **FP8 512K throughput mode** (eugr-b12x, spec off, seqs 48): **~326 tok/s @ c48**, saturates ~48
   concurrent. Clock cap 2200 costs nothing (bandwidth-bound).
@@ -113,7 +115,7 @@ RoCE env (per node): `NCCL_IB_HCA`, `NCCL_SOCKET_IFNAME`, `NCCL_IB_GID_INDEX=3` 
 - **b12x sub-flags beyond the shipped two are all rejected:** `MHC` is *officially worse* (arena raw
   37.95 vs 44.75), `SPARSE_INDEXER` −2.6%, `FP8_GEMM` crashes (`DeepGEMM layout.hpp:39`). See
   [TUNING.md](TUNING.md).
-- **SGLang + b12x is impossible on GB10 today** — the community b12x SGLang images are `linux/amd64`
+- **SGLang + b12x is impossible on GB10 today**: the community b12x SGLang images are `linux/amd64`
   and GB10 is `arm64`; the arm64 SGLang build has no b12x, and b12x 1.2.3 removed the generic
   integration API a port would need. SGLang *without* b12x also fails 2-node (worker dies during
   FlashInfer autotune). Detail in [TEST_LOG.md](TEST_LOG.md).
@@ -130,17 +132,17 @@ This vLLM build returns reasoning under the **`reasoning`** field, **not** `reas
   entry (and `max_context_size = 1000000`). Without it, the think block bleeds into content.
 
 (Server-side, tonyd2wild patch 0005 additionally guards against stop-strings decapitating reasoning
-mid-`<think>` when harnesses send `stop` sequences — a separate but related null-content bug.)
+mid-`<think>` when harnesses send `stop` sequences, a separate but related null-content bug.)
 
 ---
 
 ## What does NOT work here (short list; full detail + errors in TEST_LOG)
 
 - **SGLang:** older builds dropped the cross-node collective at boot. **0.5.17 (Aug 2026) now boots the
-  2-node path** (2.04M KV pool, server ready, trivial gen works) — but **real generation hangs the worker**
+  2-node path** (2.04M KV pool, server ready, trivial gen works), but **real generation hangs the worker**
   (`Scheduler watchdog timeout 300s` on TP1 → death). The instability moved from boot to decode; still
   not viable. Only `lmsysorg/sglang:latest` has DeepSeek-V4 at all. See UPSTREAM_GAPS #5.
-- **NVFP4 *weights* on vLLM (neko/sakamakismile/RedHatAI/nvidia):** all fail — swiglu-clamp/cutlass-
+- **NVFP4 *weights* on vLLM (neko/sakamakismile/RedHatAI/nvidia):** all fail, swiglu-clamp/cutlass-
   eager/`block_tables` for all-NVFP4, and compressed-tensors ≠ B12X native-FP8 kernels for RedHatAI.
   And NVFP4 weights don't even shrink the footprint (all ~156-168GB). The NVFP4 win is **KV**, not weights.
 - **Stock vLLM images (latest/nightly/NGC):** run no-spec eager only (PR #41834 unmerged), ~+38% slower.
@@ -183,7 +185,7 @@ BASE=http://HEAD_IP:8000/v1 uv run --with aiohttp python3 scripts/bench.py 1 2 3
 ```
 
 `scripts/bench.py` defaults to a coding prompt (high DSpark acceptance). Change `PROMPT=` to see the
-content-driven spread — the same server does ~83 tok/s on counting and ~64 on a BST implementation.
+content-driven spread, the same server does ~83 tok/s on counting and ~64 on a BST implementation.
 
 ## Versions pinned (what these numbers were measured on)
 
@@ -200,9 +202,9 @@ content-driven spread — the same server does ~83 tok/s on counting and ~64 on 
 ## Credits
 
 - **[tonyd2wild](https://github.com/tonyd2wild/DeepSeek-v4-Flash-0731-DSpark-1M-NVFP4-KV-2x-DGX-Spark)**
-  — the 1M NVFP4-KV + DSpark runtime (the DeepSeek-V4 NVFP4-KV writer that makes 1M possible), and the
+ , the 1M NVFP4-KV + DSpark runtime (the DeepSeek-V4 NVFP4-KV writer that makes 1M possible), and the
   cold-prefill garble (Patch 3) + shared-expert + stop-in-reasoning fixes.
-- **eugr** `spark-vllm-b12x` — the B12X/sparkinfer sm_121 kernels + the proven FP8 512K throughput path.
-- **bjk110** `vllm-spark:unholy-fusion` — the base image the 1M runtime builds on.
+- **eugr** `spark-vllm-b12x`: the B12X/sparkinfer sm_121 kernels + the proven FP8 512K throughput path.
+- **bjk110** `vllm-spark:unholy-fusion`: the base image the 1M runtime builds on.
 
 This repo just measures and documents; the hard runtime work is theirs.

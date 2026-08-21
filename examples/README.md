@@ -1,4 +1,4 @@
-# Recipes — runbook
+# Recipes: runbook
 
 sparkrun recipes for the 2× DGX Spark pair. Copy to your sparkrun recipe dir and run
 from the head node.
@@ -11,7 +11,7 @@ startup rather than maximum context.
 
 | | |
 |---|---|
-| Image | `ghcr.io/bjk110/vllm-spark@sha256:d8492e76…` (stage-c, vLLM 0.21.1rc1) — digest-pinned |
+| Image | `ghcr.io/bjk110/vllm-spark@sha256:d8492e76…` (stage-c, vLLM 0.21.1rc1), digest-pinned |
 | Model | `deepseek-ai/DeepSeek-V4-Flash-0731` |
 | KV | `fp8`, `block_size 256` |
 | Spec | DSpark **k=3**, `draft_sample_method: probabilistic` |
@@ -55,7 +55,7 @@ KV pool: **12.27 GiB = 1,448,712 tokens** (1.38× a full 1M-token context).
 ### When *not* to use this one
 
 For long concurrent coding sessions use the **1M recipe** (NVFP4 KV, `max-num-seqs 6`,
-k=5, util 0.82) — it trades startup time and low-concurrency throughput for a
+k=5, util 0.82), it trades startup time and low-concurrency throughput for a
 2.1M-token KV pool (allocated; see its serving caveat below). See [TUNING.md](../TUNING.md).
 
 Do **not** simply set `kv_cache_dtype: nvfp4_ds_mla` on *this* recipe: spec-decode
@@ -101,15 +101,15 @@ curl -s localhost:8890/health           # expect 200
 
 ### Prerequisites that are easy to miss
 
-1. **`loginctl enable-linger $USER` on both nodes** — otherwise systemd deletes the worker's POSIX
+1. **`loginctl enable-linger $USER` on both nodes**: otherwise systemd deletes the worker's POSIX
    semaphores when the SSH session ends and the head hangs forever.
-2. **A worker-node death during warmup is the open blocker** — the headless worker logs
+2. **A worker-node death during warmup is the open blocker**: the headless worker logs
    `Parent process exited, terminating worker queues` mid-`Warming up DeepSeek V4 sparse MLA
    attention` and the boot never completes. Ruled out so far: systemd `RemoveIPC` (linger is
    enabled), SSH session teardown (reproduces under `screen`), and a `start_worker_monitor`
    liveness patch (loaded and confirmed active; the parent still exited). Kernel OOM is *not*
    implicated either: `dmesg` shows zero kills on both nodes. Cause still unknown.
-3. **Clear stale `/dev/shm`** before a restart — orphaned segments from crashed runs eat the same
+3. **Clear stale `/dev/shm`** before a restart, orphaned segments from crashed runs eat the same
    DRAM the GPU allocates from and will cap `gpu_memory_utilization`:
    ```bash
    find /dev/shm -maxdepth 1 \
@@ -121,7 +121,64 @@ curl -s localhost:8890/health           # expect 200
 - `gpu_memory_utilization` **0.84** allocates 2,575,356 tokens (2.46×) but startup runs 25+ minutes and
   becomes fragile. 0.82 is the shipped default for restart sanity.
 - `cpu_bytes_to_use` is **2 GiB deliberately**. GB10 is unified memory, so the CPU staging tier
-  competes with the GPU KV pool — 32 GiB OOM-killed the worker.
+  competes with the GPU KV pool, 32 GiB OOM-killed the worker.
 - Do not set `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`; any offload connector rejects it.
 
 Full rationale, measurements and upstream evidence: [PROD_C5_SSD.md](../PROD_C5_SSD.md).
+
+
+## `eugr-prod.yaml` (SHIPPED production config)
+
+The **production** config for 3-5 concurrent sessions. This is the one that
+serves. Full rationale: [EUGR_B12X_PROD.md](../EUGR_B12X_PROD.md).
+
+| | |
+|---|---|
+| Image | `ghcr.io/spark-arena/dgx-vllm-eugr-nightly-b12x:2026081903` |
+| Model | `drowzeys/keys-DeepSeekV4-Flash-GA-0731-Dspark-Abliterated-32-32` (gated) |
+| KV | `fp8_ds_mla`, util 0.89 -> **1,652,056 tokens** |
+| Spec | DSpark **k=5**, probabilistic |
+| Backends | b12x MoE + linear + `B12X_MLA_SPARSE` attention |
+| Sessions | `max_num_seqs 6` (5 + headroom) |
+| Port | **8000** |
+
+### Run
+
+```bash
+cd ~/tonyd2wild/sparkrun
+screen -dmS vllm bash -lc "uvx sparkrun@0.3.5 run eugr-prod.yaml --cluster spark --trust > ~/eugr.log 2>&1"
+curl -s localhost:8000/health          # expect 200
+```
+
+Confirm in the log:
+
+```
+Using 'B12X' Mxfp4 MoE backend     # missing = half-speed fallback
+num_spec_tokens=5                  # DSpark active
+GPU KV cache size: 1,652,056 tokens
+```
+
+### Measured (warm, 128 tok/req)
+
+| concurrency | 1 | 2 | 3 | 4 | 5 | 6 |
+|---|---:|---:|---:|---:|---:|---:|
+| aggregate tok/s | 53.2 | 75.7 | 113.2 | 124.9 | **140.3** | 109.0 |
+
+c6 falls below c3: `max_num_seqs 6` is the saturation point.
+
+### Utilization ceiling
+
+`gpu_memory_utilization` 0.92 fails at startup on this hardware:
+
+```
+ValueError: Free memory on device cuda:0 (111.46/121.69 GiB) on startup is less
+than desired GPU memory utilization
+```
+
+0.92 asks for 111.95 GiB against 111.46 free, so ~0.915 is the practical ceiling.
+
+### Do not set `kv_cache_dtype: nvfp4_ds_mla` here
+
+It is rejected twice, and the second rejection is real. See §4 of
+[EUGR_B12X_PROD.md](../EUGR_B12X_PROD.md). `eugr-prod-nvfp4.yaml` is kept only as
+a record of that attempt.

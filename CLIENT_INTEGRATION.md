@@ -23,7 +23,7 @@ curl -s http://HEAD_IP:8000/v1/chat/completions -H 'Content-Type: application/js
 ## Kimi Code
 
 Point Kimi Code at the serve via an OpenAI-compatible provider and set **`reasoning_key = "reasoning"`**
-on the model entry (this is the whole fix — without it, `</think>` leaks into content):
+on the model entry (this is the whole fix, without it, `</think>` leaks into content):
 
 `~/.kimi-code/config.toml`:
 
@@ -36,14 +36,14 @@ api_key = "FREE"
 [models."vllm-local/deepseek-v4-flash"]
 provider = "vllm-local"
 model = "deepseek-v4-flash"
-max_context_size = 1000000          # not 100000 — or you silently cap the 1M ctx
+max_context_size = 1000000          # not 100000, or you silently cap the 1M ctx
 capabilities = [ "thinking", "tool_use" ]
 reasoning_key = "reasoning"         # <-- our field name (Kimi defaults to reasoning_content)
 support_efforts = [ "low", "high", "max" ]
 ```
 
 Kimi matches capabilities by model-name prefix and auto-handles `reasoning_content` for third-party
-endpoints — but only pulls reasoning from a **different** field if you name it via `reasoning_key`.
+endpoints, but only pulls reasoning from a **different** field if you name it via `reasoning_key`.
 
 Test headless (no `</think>` in the output = fixed):
 
