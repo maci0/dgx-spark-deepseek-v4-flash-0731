@@ -110,3 +110,64 @@ VRAM does not survive process exit (CUDA context destroyed) — every restart re
 
 Clock capped 2200 MHz (free — bandwidth-bound). For pure many-user throughput at ≤512K instead of 1M,
 use the eugr-b12x FP8 no-spec path (326 tok/s @ c48) — different image, different tradeoff.
+
+## fp8 vs nvfp4_ds_mla KV — measured head-to-head (2026-08-21)
+
+Both booted on the **same** recipe (`deepseek-v4-flash-0731-dspark-arena-threshold`,
+util **0.78**, `max-num-seqs 12`, DSpark **k=3**), changing only `kv_cache_dtype`.
+Measured warm via `/v1/completions` with `ignore_eos:true`, 128 tokens/request.
+
+| `kv_cache_dtype` | KV pool | tokens | bytes/token | c1 tok/s | c5 aggregate |
+|---|---:|---:|---:|---:|---:|
+| `fp8` | 12.27 GiB | **1,448,712** | ~9,094 | **58.3** | **162.5** |
+| `nvfp4_ds_mla` | 11.46 GiB | 1,354,614 | ~9,083 | 51.1 | 159.2 |
+
+**At this util/seqs combination NVFP4 KV is not a win** — near-identical bytes/token
+(~9.1 KB), *fewer* total tokens (less memory left available), and ~12% slower
+single-stream.
+
+**Do not read this as "NVFP4 KV is worse."** The large NVFP4 pools documented above
+(2.14M @ util 0.82, 2.77M @ util 0.85) come from the **1M recipe**, which pairs
+NVFP4 KV with `max-num-seqs 6` and `k=5`. Spec-decode buffers scale with
+`max_num_seqs × (k+1)`, so at `max-num-seqs 12` those buffers consume the memory that
+should have become KV. The KV dtype and the seqs/k choice have to be tuned together —
+changing one alone gives a misleading result (this table is exactly that mistake,
+kept here as the control).
+
+## Aggregate throughput at low concurrency (2026-08-21)
+
+Production config (`arena-threshold`: fp8 KV, util 0.78, `max-num-seqs 12`, k=3),
+warm, `ignore_eos:true`, 128 tokens/request:
+
+| concurrency | aggregate tok/s | per-request tok/s |
+|---|---:|---:|
+| 1 | 58.3 | 58.3 |
+| 5 | **162.5** | ~32.5 |
+
+Consistent with the `max-num-seqs` table above (seqs 6 → 159 tok/s at c6), and with an
+independent community GB10 measurement of 61.5 tok/s single-stream text-only. For
+higher aggregate, raise `max-num-seqs` — it scales roughly linearly and costs nothing
+at c1.
+
+## b12x sub-feature flags (2026-08-20) — all measured, none adopted
+
+The stage-c image exposes more b12x toggles than the recipe enables. Tested on the
+arena-threshold config; baseline 28-cell grid mean **53.57**, official arena decode
+raw mean **44.75**.
+
+| Flag | Result | Verdict |
+|---|---|---|
+| `VLLM_USE_B12X_MOE=1` | already on in the shipped recipe | **keep** |
+| `VLLM_USE_B12X_WO_PROJECTION=1` | already on | **keep** |
+| `VLLM_USE_B12X_MHC=1` | +1.9% local (inside noise); **official arena raw 37.95 vs 44.75** | reject — officially worse |
+| `VLLM_USE_B12X_SPARSE_INDEXER=1` | −2.6%; collapses deep-context cells (the Lightning Indexer does most of its work at long context) | reject |
+| `VLLM_USE_B12X_FP8_GEMM=1` | **crash**: `DeepGEMM/csrc/.../utils/layout.hpp:39: t.dim() == N` | reject |
+| `VLLM_DSV4_B12X_COMPRESSED_MLA` | left at `0` in the recipe; same kernel family that hangs under the eugr b12x image | leave off |
+
+Also measured and rejected:
+
+| Change | Result |
+|---|---|
+| `num_speculative_tokens` 3 → 5 *(on the arena-threshold config)* | **−6.7%** (49.99 vs 53.57). Note the 1M recipe uses k=5 deliberately — k must be a multiple of `n_predict=5`, and it pairs with `max-num-seqs 6`. |
+| `long_prefill_token_threshold` 1024 → 4096 | neutral |
+| `--load-format fastsafetensors` | load ~3× faster (60 s vs 3m17s) but **OOM-kills the worker** on unified memory — unusable |

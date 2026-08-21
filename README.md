@@ -100,6 +100,21 @@ RoCE env (per node): `NCCL_IB_HCA`, `NCCL_SOCKET_IFNAME`, `NCCL_IB_GID_INDEX=3` 
   sessions grow to 200-500K+ tokens. (Push higher with care: less capture/runtime headroom.)
 - **FP8 512K throughput mode** (eugr-b12x, spec off, seqs 48): **~326 tok/s @ c48**, saturates ~48
   concurrent. Clock cap 2200 costs nothing (bandwidth-bound).
+- **Low-concurrency aggregate, arena-threshold config** (fp8 KV, util 0.78, seqs 12, k=3; warm,
+  `ignore_eos`, 128 tok/req): **c1 = 58.3 tok/s, c5 = 162.5 tok/s aggregate** (~32.5/stream).
+  Matches an independent community GB10 figure of 61.5 tok/s single-stream text-only.
+- **KV dtype must be tuned *together with* `max-num-seqs`/`k`.** Swapping `fp8` → `nvfp4_ds_mla` while
+  holding util 0.78 / seqs 12 / k=3 makes things *worse* (1.35M vs 1.45M tokens, c1 51.1 vs 58.3):
+  spec-decode buffers scale with `max_num_seqs × (k+1)` and eat the memory that should become KV. The
+  big NVFP4 pools (2.14M @ 0.82, 2.77M @ 0.85) come from the 1M recipe's **seqs 6 + k=5** pairing.
+  Full head-to-head in [TUNING.md](TUNING.md).
+- **b12x sub-flags beyond the shipped two are all rejected:** `MHC` is *officially worse* (arena raw
+  37.95 vs 44.75), `SPARSE_INDEXER` −2.6%, `FP8_GEMM` crashes (`DeepGEMM layout.hpp:39`). See
+  [TUNING.md](TUNING.md).
+- **SGLang + b12x is impossible on GB10 today** — the community b12x SGLang images are `linux/amd64`
+  and GB10 is `arm64`; the arm64 SGLang build has no b12x, and b12x 1.2.3 removed the generic
+  integration API a port would need. SGLang *without* b12x also fails 2-node (worker dies during
+  FlashInfer autotune). Detail in [TEST_LOG.md](TEST_LOG.md).
 
 ---
 

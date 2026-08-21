@@ -351,3 +351,118 @@ bjk110-based tonyd2wild image.** (FP8 512K remains the eugr ceiling.)
 
 ### B1 — deepseek-ai official FP8, eugr-b12x, no-spec, 256K, seqs 48
 - Status: ⏳ loading
+
+---
+
+## SGLang + b12x on GB10 — architecture blocker (2026-08-20/21)
+
+Goal was aggregate throughput at c5 under SGLang with b12x kernels. **Not achievable
+today**, for a hardware reason rather than a config one.
+
+### b12x availability by architecture
+
+| Component | arm64 / DGX Spark? | Note |
+|---|---|---|
+| b12x kernels **v1.2.3** | ✅ | ships inside `eugr/spark-vllm-b12x` — "DGX Spark and RTX 6000-focused inference kernel library" |
+| vLLM + b12x | ✅ | what this repo serves with |
+| SGLang, arm64 | ✅ | `scitrera/dgx-spark-sglang:0.5.17` (digest `sha256:cc1cec4d…`), SGLang 0.5.17 / torch 2.11.0 / FlashInfer 0.6.15.post1 — **no b12x** |
+| SGLang + b12x | ❌ | `voipmonitor/sglang:cu130`, `lukealonso/sglang-cuda13-b12x` are **linux/amd64** → `exec format error` on GB10 |
+| b12x upstreamed into SGLang | ❌ | one doc mention in `sgl-project/sglang`, no integration code |
+
+The community b12x SGLang images target RTX PRO 6000 x86 workstations (SM120), not
+GB10 (sm_121a, aarch64).
+
+### Why a port was scoped and rejected
+
+The b12x fork of SGLang is ~0.5.12-era (May 2026) and written against b12x **0.8/0.10**.
+The arm64 package is **1.2.3**, whose `integration/` layer was refactored to be
+vLLM-only — `attention.py`, `mla.py`, `nsa_indexer.py`, `tp_moe.py` were all removed.
+Of ten symbols the fork imports, five no longer exist:
+
+| Symbol | In b12x 1.2.3 |
+|---|---|
+| `dense_gemm` | `b12x/_lib/dense_gemm.py` |
+| `b12x_moe_fp4` | `b12x/moe/fused_moe/_impl.py` |
+| `PagedAttentionWorkspace` | `b12x/attention/paged/workspace.py` |
+| `build_decode_chunk_pages_lut` | `b12x/attention/paged/planner.py` |
+| `get_decode_graph_policy` | `b12x/attention/paged/tuning/registry.py` |
+| `get_paged_mqa_logits_metadata` | **missing** |
+| `make_nsa_indexer_contract_phantoms` | **missing** |
+| `_as_grouped_scale_view` | **missing** |
+| `B12XExecutionLane` | **missing** |
+| `get_b12x_moe_workspace_pool` | **missing** |
+
+Also, `nsa_backend.py` carries 147 b12x-referencing lines and diverges heavily between
+0.5.12 and 0.5.17. A working port means writing a **new** SGLang↔b12x bridge against
+undocumented internals, using vLLM's b12x call sites as the only reference. Days of
+work, unproven payoff — rejected.
+
+### SGLang without b12x — also blocked
+
+`scitrera/dgx-spark-sglang:0.5.17`, recipe `sglang-c5.yaml`, model
+`drowzeys/keys-DeepSeekV4-Flash-GA-0731-Dspark-Abliterated-32-32` (gated, 156 GB,
+48 shards, `num_nextn_predict_layers=1` so it ships the MTP/DSpark draft head).
+
+**What worked:** DSPARK is accepted and auto-detects the bundled drafter —
+*"DSpark draft weights are bundled in the target checkpoint; defaulting
+`--speculative-draft-model-path`"* — and KV dtype auto-selects `fp8_e4m3`.
+MoE backends available: `flashinfer_mxfp4` (DeepSeek's own recommendation), plus
+`deep_gemm`, `flashinfer_cutlass`, `cutlass`, `triton`, `marlin`, `hpc_ops`.
+
+**Blocker:** on 2-node bring-up the worker rank dies during FlashInfer autotune:
+
+```
+[TP1] Running FlashInfer autotune with cache: /cache/runtime/sglang/flashinfer/autotune/0.6.15.post1/sm121/...
+Terminated
+```
+
+then the head fails with
+`RuntimeError: gloo/transport/tcp/pair.cc:547 Connection closed by peer [192.168.0.212]`.
+
+`--dist-timeout 3600` does **not** help — the worker is terminated outright, it is not
+timing out. The same log also warns *"Breakable CUDA graph is incompatible with
+DeepSeek-V4 (heavy capture-pool memory pressure); disabling prefill CUDA graph"*.
+Unresolved; abandoned in favour of the working vLLM path.
+
+## b12x hangs under the eugr image — root-caused with py-spy (2026-08-20)
+
+Two distinct hangs, both located with `py-spy` after granting `CAP_SYS_PTRACE`
+(see TROUBLESHOOTING → Tooling).
+
+**1. GEMM launched on a non-default CUDA stream (workaround found).**
+
+```
+run_compiled_program (cutlass/base_dsl/jit_executor.py:1074)
+dense_gemm_fused_quant_a (b12x/_lib/dense_gemm.py:7057)
+_block_fp8_linear_mxfp8_fused_op (b12x/gemm/_shared/block_fp8.py:568)
+...
+apply_weights (vllm/model_executor/kernels/linear/scaled_mm/b12x.py:280)
+<lambda> (vllm/models/deepseek_v4/attention.py:718)
+execute_in_parallel (vllm/utils/multi_stream_utils.py:212)
+_run_parallel_input_projections (vllm/models/deepseek_v4/attention.py:717)
+```
+
+`execute_in_parallel` dispatches the attention input projections onto auxiliary CUDA
+streams. Forcing its built-in serial fallback (`enable=False`) clears the hang and the
+server serves normally.
+
+**2. Sparse-MLA prefill (no workaround).**
+
+```
+_sparse_mla_prefill_mg_flat_launch (b12x/attention/_shared/mla/prefill_mg.py:3888)
+run_unified_prefill_mg → _run_partitioned_mg → run_unified_prefill
+_run_sm120_compressed_prefill (b12x/attention/_shared/mla/compressed_api.py:366)
+compressed_mla_decode_forward (b12x/attention/_shared/mla/compressed_api.py:233)
+```
+
+Note `_run_sm120_compressed_prefill` being selected on **sm_121a** — possibly an
+arch-gate treating 12.1 as 12.0-compatible. `EngineCore` sits in
+`multiproc_executor.get_response`→`shm_broadcast.dequeue` waiting on that worker, which
+is why the process looks alive and `/health` keeps returning 200.
+
+Reported upstream with full stacks:
+<https://github.com/eugr/spark-vllm-docker/issues/352>
+
+Also confirmed: `/v1/chat/completions` hangs on that image (requests never reach the
+engine — the hang is in the API-server chat/reasoning-parser path) and wedges every
+subsequent `/v1/completions` request. Benchmark through `/v1/completions` only.

@@ -15,6 +15,34 @@ Every row below was hit and fixed on real 2× GB10. Verbatim errors + deeper dia
 | Startup **stalls ~11+ min** at "kv cache quantization", GPU 96%, `shm_broadcast` repeating | `gpu-memory-utilization` too high (0.85 → 2.77M-token NVFP4 pool is pathologically slow to quantize/capture) | Use **util 0.82** (2.14M pool, fast startup). See [TUNING.md](TUNING.md). |
 | Another container (`llama-server`/gpustack) silently steals GB10 memory | Auto-restarted on boot, contends for shared unified memory | Stop it before serving: `docker stop $(docker ps -q --filter name=llama) gpustack-worker`. |
 
+### systemd `RemoveIPC` silently kills the worker rank (2026-08-20)
+
+The single highest-impact bug found so far. `logind.conf` ships `RemoveIPC=yes`, and the worker node is
+started over SSH — when that login session closes, systemd deletes **every POSIX semaphore owned by the
+user**, including the ones vLLM's `MultiprocExecutor` just created:
+
+```
+File ".../multiprocessing/synchronize.py", line 115, in __setstate__
+    self._semlock = _multiprocessing.SemLock._rebuild(*state)
+FileNotFoundError: [Errno 2] No such file or directory
+```
+
+The head node does **not** error. It blocks forever on the next collective. Presentations seen:
+`shm_broadcast ... no block found in 60 seconds` repeating, GPU pinned at 96% with zero progress,
+CUDA-graph capture frozen mid-percentage, and `DistStoreError: Timed out ... 1/2 clients joined`.
+
+**Diagnostic tell:** the worker container is up but has **no `Worker_TP` process at all**
+(`docker exec <cid> ps -eo comm`). "Worker idle" actually means "worker dead".
+
+**Fix** — persists across reboots, needs no root:
+
+```bash
+loginctl enable-linger $USER            # on BOTH nodes
+loginctl show-user $USER | grep Linger  # must print Linger=yes
+```
+
+Several failures previously attributed to b12x kernel deadlocks were really this.
+
 ## NVFP4 / KV cache
 
 | Symptom | Cause | Fix |
@@ -42,3 +70,27 @@ Every row below was hit and fixed on real 2× GB10. Verbatim errors + deeper dia
 |---|---|---|
 | Node overheats / powers off under sustained load | GB10 firmware cooling limits under 140W sustained | Cap clock: `sudo nvidia-smi -lgc 0,2200`. **Zero throughput loss** (bandwidth-bound). Do NOT rely on a firmware "fix" — some UEFI/EC updates *cause* fan-curve regressions (see NVIDIA forums). |
 | GPU pinned ~611 MHz / ~13W / ~50°C under load | USB-C PD controller firmware wedge | Cold-drain reset of the power brick (community-confirmed). |
+
+## Tooling / measurement traps (2026-08-20)
+
+These cost hours and produced several wrong conclusions before being identified.
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Server "never healthy" but is actually serving | eugr/SGLang recipes serve on **8000**, the stage-c record recipe on **8888** | Health-check the port the recipe declares, not the one you used last |
+| `Starting vLLM server` never appears in the launcher log | That banner goes to the container's own log, not sparkrun's | `docker exec <cid> tail /tmp/sparkrun_serve.log` |
+| Engine looks deadlocked: `EngineCore` in `run_busy_loop`→`queue.get()`, workers in `shm_broadcast.dequeue` | That is the **normal ready-and-waiting state** | Confirm with a real request before declaring a hang |
+| Teardown/launch commands silently do nothing | `pkill -f sparkrun_serve` matches **your own SSH command line** and kills the shell mid-script | Use `pkill -f "[s]parkrun_serve"` |
+| Detached launch dies as soon as the SSH call returns | `nohup ... &` inside a compound remote command | `setsid nohup … </dev/null &` as its own invocation |
+| HF download fails `PermissionError: .../hub/.locks/...` | Root-owned cache dirs left by an earlier docker-compose-as-root run | Parent `hub/` is user-owned, so **no sudo needed**: `mv hub/.locks hub/.locks.root && mkdir hub/.locks` |
+| sparkrun re-downloads the full 156 GB checkpoint every launch | sparkrun distributes models itself into the standard `hub/` cache and ignores `HF_HUB_CACHE` | Stage checkpoints in `~/.cache/huggingface/hub/`, not a custom root |
+| `py-spy` fails with `Permission denied` inside the container | sparkrun rootless mode hardcodes `cap_add = []`; a recipe-level `cap_add:` does **not** override it. Host also has `kernel.yama.ptrace_scope=1` | Patch `sparkrun/orchestration/executors/docker.py`: `adjustments["cap_add"] = ["SYS_PTRACE"]` (every copy under `~/.cache/uv/archive-v0/*/`), then `docker exec -u 0 <cid> py-spy dump --pid <pid>` |
+
+### Benchmark validity
+
+| Trap | Effect | Guard |
+|---|---|---|
+| Cold vs warm cache | Up to **2.5×** swing — the same config measured `c1 = 23.7` then `59.4` tok/s back to back | Always warm first, then take ≥2 measurements |
+| Run-to-run variance | ~4% (same config gridded 56.95 and 54.60 on different days) | Treat deltas under ~5% as noise |
+| `ignore_eos` off | Early EOS shortens requests and inflates per-request overhead | Set `"ignore_eos": true` so every request emits exactly `max_tokens` |
+| `--enable-prefix-caching` + repeated prompts | First cell of a grid row pays cold prefill, later cells reuse the prefix — makes c1-at-depth look catastrophic vs c2/c5/c10 | Compare only like-for-like cache states |
