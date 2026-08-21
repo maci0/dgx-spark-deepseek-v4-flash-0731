@@ -13,7 +13,14 @@ for n in "$HEAD" "$WORKER"; do
     pkill -9 -f 'vllm serve|EngineCore|multiproc_executor' 2>/dev/null || true
     docker rm -f tonyd2wild-vllm-dspark-1 2>/dev/null || true
     docker stop \$(docker ps -q --filter name=llama) gpustack-worker 2>/dev/null || true
-    sudo -n nvidia-smi -lgc 0,$CLK 2>/dev/null || true"
+    sudo -n nvidia-smi -lgc 0,$CLK 2>/dev/null || true
+    # Orphaned shm segments from crashed engines survive container teardown. On
+    # unified memory tmpfs eats the same DRAM the GPU allocates from, so leaving
+    # them behind silently caps gpu-memory-utilization via the
+    # 'Free memory on device' guard (seen: 46 GB stranded across both nodes).
+    find /dev/shm -maxdepth 1 \\
+      \\( -name 'psm_*' -o -name 'nccl-*' -o -name 'sem.mp-*' -o -name 'mp-*' \\) \\
+      -delete 2>/dev/null || true"
   echo "cleaned $n"
 done
 ssh -i "$KEY" "maci@$HEAD" "cd '$DIR' && ./start-deepseek-v4-flash-dspark.sh"

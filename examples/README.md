@@ -72,3 +72,51 @@ and seqs/k must be changed together.
 - Both nodes need `loginctl enable-linger $USER`, or systemd deletes the worker's POSIX
   semaphores when the SSH session closes and the head hangs forever on a collective.
   See [TROUBLESHOOTING.md](../TROUBLESHOOTING.md).
+
+## `prod-c5-ssd.yaml`
+
+The **production** config: ~5 concurrent clients, ~2.2-2.6M token KV pool, KV spill to NVMe.
+Serves on **port 8890** (so it can run alongside the arena config on 8888).
+
+| | |
+|---|---|
+| Image | stage-c, digest-pinned (only build with the padded `nvfp4_ds_mla` writer) |
+| Model | `drowzeys/keys-DeepSeekV4-Flash-GA-0731-Dspark-Abliterated-32-32` (gated) |
+| KV | `nvfp4_ds_mla`, util **0.82** → **2,233,845 tokens** (2.13× a 1M context) |
+| Spec | DSpark **k=5** |
+| Clients | `max_num_seqs 6` (5 + headroom) |
+| Offload | `OffloadingConnector` + stock `fs_python` disk tier → `/kvspill` |
+
+### Run
+
+```bash
+mkdir -p ~/kvspill                      # on BOTH nodes
+uvx sparkrun@0.3.5 run prod-c5-ssd.yaml --cluster spark --trust
+curl -s localhost:8890/health           # expect 200
+```
+
+### Prerequisites that are easy to miss
+
+1. **`loginctl enable-linger $USER` on both nodes** — otherwise systemd deletes the worker's POSIX
+   semaphores when the SSH session ends and the head hangs forever.
+2. **The worker-monitor patch** — copy
+   [`scripts/sitecustomize-worker-monitor-fix.py`](../scripts/sitecustomize-worker-monitor-fix.py)
+   to `~/.cache/huggingface/pypatch/sitecustomize.py` on **both** nodes. Without it the headless
+   worker-node parent exits mid-warmup and SIGKILLs a healthy worker; NVFP4 boots hit this every
+   time. The recipe already sets `PYTHONPATH=/cache/huggingface/pypatch`.
+3. **Clear stale `/dev/shm`** before a restart — orphaned segments from crashed runs eat the same
+   DRAM the GPU allocates from and will cap `gpu_memory_utilization`:
+   ```bash
+   find /dev/shm -maxdepth 1 \
+     \( -name 'psm_*' -o -name 'nccl-*' -o -name 'sem.mp-*' -o -name 'mp-*' \) -delete
+   ```
+
+### Tuning notes
+
+- `gpu_memory_utilization` **0.84** yields 2,575,356 tokens (2.46×) but startup runs 25+ minutes and
+  becomes fragile. 0.82 is the shipped default for restart sanity.
+- `cpu_bytes_to_use` is **2 GiB deliberately**. GB10 is unified memory, so the CPU staging tier
+  competes with the GPU KV pool — 32 GiB OOM-killed the worker.
+- Do not set `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`; any offload connector rejects it.
+
+Full rationale, measurements and upstream evidence: [PROD_C5_SSD.md](../PROD_C5_SSD.md).

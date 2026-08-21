@@ -94,3 +94,19 @@ These cost hours and produced several wrong conclusions before being identified.
 | Run-to-run variance | ~4% (same config gridded 56.95 and 54.60 on different days) | Treat deltas under ~5% as noise |
 | `ignore_eos` off | Early EOS shortens requests and inflates per-request overhead | Set `"ignore_eos": true` so every request emits exactly `max_tokens` |
 | `--enable-prefix-caching` + repeated prompts | First cell of a grid row pays cold prefill, later cells reuse the prefix — makes c1-at-depth look catastrophic vs c2/c5/c10 | Compare only like-for-like cache states |
+
+## KV offload to SSD (2026-08-21)
+
+Disk-spill **is** reachable on the stage-c image without patches — but only via a connector that
+implements `SupportsHMA`. DeepSeek-V4's sparse-MLA sm120 decode requires the hybrid KV manager, and
+`--kv-transfer-config` disables HMA for any connector that doesn't declare support.
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `sparse_mla_sm120_decode_dsv4: Check failed num_tokens>64 (36 vs 64)` at startup | Connector lacks `SupportsHMA` → vLLM turned off the hybrid KV manager. `LMCacheConnectorV1` is in this category | Use **`OffloadingConnector`** (or `SimpleCPUOffloadConnector`) — both declare `SupportsHMA` |
+| `ValidationError ... KV connector OffloadingConnector is incompatible with PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True unless enable_cumem_alloc` | The connector registers KV buffers; an expandable-segments VMM remap would invalidate them | Set `PYTORCH_CUDA_ALLOC_CONF=garbage_collection_threshold:0.9` (drop `expandable_segments`), or enable the cumem allocator |
+
+Disk tier is stock: `TieringOffloadingSpec` + secondary tier `"fs_python"`
+(`vllm/v1/kv_offload/tiering/fs/manager.py`, *"pure-Python disk-backed secondary tier"*), parameters
+`root_dir`, `n_read_threads`, `n_write_threads`. Working config in
+[examples/prod-c5-ssd.yaml](examples/prod-c5-ssd.yaml).

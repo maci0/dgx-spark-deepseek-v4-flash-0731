@@ -109,11 +109,34 @@ cleared, 4th blocks it:
    + sparse-MLA, and the DSpark verify batch (`num_tokens = seqs × (k+1)`, e.g. 36) then mis-routes:
    `sparse_mla_sm120_decode_dsv4: Check failed num_tokens>64 (36 vs 64)`. Fatal at startup.
 
-**Root cause:** `LMCacheConnectorV1` (and all offload connectors — `OffloadingConnector`,
-`FlexKVConnectorV1`, `SimpleCPUOffloadConnector`) do **not** implement `SupportsHMA`, so vLLM disables
-the hybrid KV manager, which the DeepSeek-V4 sparse-MLA sm120 decode path requires (it also carries the
-DSpark k=5 verify). **The disk-spill blocker is HMA support in the connector, not the NVFP4 KV format.**
-Fixes: land `SupportsHMA` on `LMCacheConnectorV1`, or run without DSpark/sparse-MLA (defeats the purpose).
+**Root cause:** `LMCacheConnectorV1` does **not** implement `SupportsHMA`, so vLLM disables the hybrid
+KV manager, which the DeepSeek-V4 sparse-MLA sm120 decode path requires (it also carries the DSpark k=5
+verify). **The disk-spill blocker is HMA support in the connector, not the NVFP4 KV format.**
+
+> ### ⚠️ CORRECTION (2026-08-21) — this gap is narrower than originally written
+>
+> The original claim that **all** offload connectors lack `SupportsHMA` is **wrong**. Only LMCache was
+> tested. Checking the stage-c image directly
+> (`vllm/distributed/kv_transfer/kv_connector/v1/`):
+>
+> | Connector | `SupportsHMA` |
+> |---|---|
+> | `LMCacheConnectorV1` | ❌ — the one that was tested |
+> | `OffloadingConnector` | ✅ `class OffloadingConnector(KVConnectorBase_V1, SupportsHMA)` |
+> | `SimpleCPUOffloadConnector` | ✅ |
+>
+> Stock vLLM also already ships a **disk-backed tier**, so no custom image is needed:
+> `vllm/v1/kv_offload/tiering/` registers `TieringOffloadingSpec` (a CPU primary tier plus
+> configurable secondary tiers) and `SecondaryTierFactory.register_tier("fs_python", …,
+> "FileSystemTierManager")` — *"pure-Python disk-backed secondary tier"*, taking `root_dir`,
+> `n_read_threads`, `n_write_threads`.
+>
+> So SSD KV-spill **with** DSpark + sparse-MLA is worth pursuing via `OffloadingConnector`, not
+> LMCache. See `examples/prod-c5-ssd.yaml`. Note wall #2 still applies to *any* of these connectors:
+> `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` is rejected outright —
+> `Value error, KV connector OffloadingConnector is incompatible with
+> PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True unless enable_cumem_alloc` — so set
+> `garbage_collection_threshold:0.9` instead.
 
 ## 9. TokenSpeed (LightSeek) engine — builds + runs on GB10, blocked at weight-load by UMA page-cache OOM
 TokenSpeed ships a `deepseek_v4_dspark` model + a DeepSeek-V4-Flash recipe (4×B200 SM100). We got it

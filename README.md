@@ -13,6 +13,7 @@ Scope is intentionally narrow: **this one checkpoint, this one hardware**. Not a
 - **[MODEL_VARIANTS.md](MODEL_VARIANTS.md)** — which HF checkpoints fit this setup (abliterated FP8, REAP-pruned) + what to try next.
 - **[TUNING.md](TUNING.md)** — the util→KV-pool lever (and the 0.85 startup cliff), single-stream ceiling, content-driven DSpark.
 - **[TROUBLESHOOTING.md](TROUBLESHOOTING.md)** — symptom → cause → fix table for every failure hit here.
+- **[PROD_C5_SSD.md](PROD_C5_SSD.md)** — production config: 5 clients, ~2.2-2.6M KV, **SSD KV offload** (works — UPSTREAM_GAPS #7 was too pessimistic), param minimization, node housekeeping.
 - **[examples/.env.dspark.example](examples/.env.dspark.example)** · **[scripts/clean-restart.sh](scripts/clean-restart.sh)** · **[scripts/bench.py](scripts/bench.py)**
 
 ## Topology
@@ -30,12 +31,13 @@ Scope is intentionally narrow: **this one checkpoint, this one hardware**. Not a
 
 ---
 
-## TL;DR — two configs that work
+## TL;DR — three configs that work
 
 | Goal | Framework / image | Quant | Ctx | Spec | Measured |
 |------|-------------------|-------|-----|------|----------|
 | **Max context (1M)** | vLLM, tonyd2wild `dspark-nvfp4-stage-c` (bjk110 base) | FP8 weights + **NVFP4 KV** | **1,048,576** | DSpark k5 | ~37-41 tok/s/stream @ c1-3; KV pool up to 2.77M tokens |
 | **Max throughput (≤512K)** | vLLM, eugr `spark-vllm-b12x` | FP8 (UE8M0) | 512K | off | **~326 tok/s @ c48** |
+| **Prod, 5 clients + SSD KV spill** | vLLM, tonyd2wild `dspark-nvfp4-stage-c` | FP8 weights + **NVFP4 KV** | 1M | DSpark k=5 | **2.23M-token KV**, offload to NVMe — see [PROD_C5_SSD.md](PROD_C5_SSD.md) |
 
 Everything else is worse or broken on this hardware — see the matrix.
 
