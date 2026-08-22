@@ -5,6 +5,17 @@ this cluster with one harness, not quoted from upstream.
 
 **Recipe:** [`examples/anemll-nvfp4-golden.yaml`](examples/anemll-nvfp4-golden.yaml)
 · **Endpoint:** `http://192.168.0.211:8000/v1`
+· **Model names:** `deepseek-v4-flash`, `dsv4`, or the full HF path
+
+```bash
+curl -s http://192.168.0.211:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"hi"}],"max_tokens":64}'
+```
+
+The aliases are declared with `--served-model-name` **alongside** the full HF
+path, not instead of it, so existing clients keep working and swapping the
+underlying checkpoint later does not force every caller to change.
 
 ```bash
 bash ~/spark-launch.sh anemll-nvfp4.yaml ~/anemll.log

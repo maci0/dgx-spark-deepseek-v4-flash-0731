@@ -37,6 +37,9 @@ defaults:
   max_cudagraph_capture_size: 36
   long_prefill_token_threshold: 1024
   num_speculative_tokens: 5
+  # Short alias for clients. Listed alongside the full HF path, not
+  # instead of it, so existing callers keep working.
+  served_model_name: "deepseek-v4-flash dsv4"
 
 env:
   VLLM_USE_BREAKABLE_CUDAGRAPH: "0"
@@ -47,6 +50,7 @@ command: |
       --host {host} \
       --port {port} \
       --trust-remote-code \
+      --served-model-name {served_model_name} \
       --tensor-parallel-size {tensor_parallel} \
       --pipeline-parallel-size 1 \
       --kv-cache-dtype {kv_cache_dtype} \

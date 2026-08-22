@@ -30,7 +30,7 @@ Scope is intentionally narrow: **this one checkpoint, this one hardware**. Not a
         │  serves :8000  ◄────────┼─ clients (Kimi, curl)   │  headless               │
         └─────────────────────────┘                         └─────────────────────────┘
                  TP=2, --distributed-executor-backend mp --nnodes 2
-        152 GB model split ~76 GB/node · largest KV pool that has served: 1.46M tokens · clock capped 2200 MHz
+        152 GB model split ~76 GB/node · largest KV pool that has served: 2.00M tokens · clock capped 2200 MHz
 ```
 
 ---
@@ -39,11 +39,15 @@ Scope is intentionally narrow: **this one checkpoint, this one hardware**. Not a
 
 | Goal | Framework / image | Quant | Ctx | Spec | Measured |
 |------|-------------------|-------|-----|------|----------|
-| **Max context (1M)** | vLLM, tonyd2wild `dspark-nvfp4-stage-c` (bjk110 base) | FP8 weights + **NVFP4 KV** | **1,048,576** | DSpark k5 | ~37-41 tok/s/stream @ c1-3; KV pools >1.5M allocate but have not reached serving |
-| **Max throughput (≤512K)** | vLLM, eugr `spark-vllm-b12x` | FP8 (UE8M0) | 512K | off | **~326 tok/s @ c48** |
-| **Prod, 3-5 sessions (fastest)** | vLLM, eugr `dgx-vllm-eugr-nightly-b12x:2026081903` | FP8 weights + **fp8_ds_mla KV** | 1M | DSpark k=5 | **1,674,044-token KV, 135.0 tok/s agg @ c5**, b12x MoE, zero patches, 73-line recipe |
-| **Prod, 3-5 sessions (max context)** | vLLM, tonyd2wild `dspark-nvfp4-stage-c` | FP8 weights + **NVFP4 KV** | 1M | DSpark k=5 | **2,198,373-token KV** (+31%), 109.7 tok/s agg @ c5 (-19%). Only route past ~1.7M |
-| **Prod, 5 clients + SSD KV spill** | vLLM, tonyd2wild `dspark-nvfp4-stage-c` | FP8 weights + **NVFP4 KV** | 1M | DSpark k=5 | superseded by the two rows above; kept for the SSD-offload findings. See [PROD_C5_SSD.md](PROD_C5_SSD.md) |
+| **Prod, 5 clients (SHIPPED)** | vLLM, `ghcr.io/anemll/dspark-vllm-gx10:0.1.1` | FP8 weights + **nvfp4_ds_mla KV** | 1M | DSpark k=5 | **2,002,497-token KV**, c3 112.7 / c5 126.2 / **c6 157.9 tok/s**, util 0.82, zero patches. See [GOLDEN.md](GOLDEN.md) |
+| Rollback, newer vLLM | vLLM, eugr `dgx-vllm-eugr-nightly-b12x:2026081903` | FP8 weights + **fp8_ds_mla KV** | 1M | DSpark k=5 | **1,768,024-token KV** (-13%), c5 127.4 / c6 ~109. vLLM 0.27.x, five weeks newer |
+| Tried, slower and smaller | vLLM, tonyd2wild `dspark-nvfp4-stage-c` | FP8 weights + NVFP4 KV | 1M | DSpark k=5 | **1,438,916-token KV** (-28%), c5 116.0 / c6 141.1. Earlier claim of 2,198,373 does not reproduce |
+| **Max throughput (<=512K)** | vLLM, eugr `spark-vllm-b12x` | FP8 (UE8M0) | 512K | off | **~326 tok/s @ c48** |
+| Not achievable | any | any | any | any | **SSD KV offload** faults on this model under every KV dtype ([test](https://github.com/maci0/vllm-spark-nvfp4/blob/main/KV_OFFLOAD_MLA.md)); **~2.5M KV** exceeds what fits ([KV_CEILING.md](KV_CEILING.md)) |
+
+All rows above measured 2026-08-22 with one harness (`c5.py`, shared coding
+prompt, 128 tok/req). Throughput on this stack varies by ~1.7x with prompt
+shape alone, so numbers are only comparable within a harness.
 
 Everything else is worse or broken on this hardware, see the matrix.
 
@@ -99,13 +103,18 @@ RoCE env (per node): `NCCL_IB_HCA`, `NCCL_SOCKET_IFNAME`, `NCCL_IB_GID_INDEX=3` 
   2-3 concurrent chats each stay near single-stream.
 - **The one real lever = `gpu-memory-utilization` → KV pool size** (for concurrent *large* sessions):
 
-  | util | KV pool (tokens) | concurrency @ 1M |
-  |------|-----------------:|-----------------:|
-  | 0.78 | 1,181,262 | 1.13× |
-  | 0.85 | **2,769,487** | **2.64×** |
+  | image | util | KV pool (tokens) | concurrency @ 1M |
+  |---|------|-----------------:|-----------------:|
+  | anemll (shipped) | **0.82** | **2,002,497** | **1.91x** |
+  | anemll | 0.835 | 2,227,486 allocated | dies in FlashInfer autotune |
+  | eugr b12x | 0.89 | 1,768,024 | 1.58x |
+  | stage-c | 0.78 | 1,438,916 | 1.37x |
 
-  2.3× more KV capacity for a small util bump, the thing that matters for coding agents whose
-  sessions grow to 200-500K+ tokens. (Push higher with care: less capture/runtime headroom.)
+  The util value is **not portable across images**: the same number produces very
+  different pools, and each image has its own ceiling for a different reason.
+  On the shipped config the ceiling is FlashInfer autotune, not graph capture.
+  Bytes per token is the comparable figure: anemll 7,650, eugr 11,317, stage-c
+  ~11,900.
 - **FP8 512K throughput mode** (eugr-b12x, spec off, seqs 48): **~326 tok/s @ c48**, saturates ~48
   concurrent. Clock cap 2200 costs nothing (bandwidth-bound).
 - **Low-concurrency aggregate, arena-threshold config** (fp8 KV, util 0.78, seqs 12, k=3; warm,
