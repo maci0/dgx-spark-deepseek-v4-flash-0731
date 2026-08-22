@@ -51,6 +51,10 @@ command: |
       --port {port} \
       --trust-remote-code \
       --served-model-name {served_model_name} \
+      --tokenizer-mode deepseek_v4 \
+      --tool-call-parser deepseek_v4 \
+      --enable-auto-tool-choice \
+      --reasoning-parser deepseek_v4 \
       --tensor-parallel-size {tensor_parallel} \
       --pipeline-parallel-size 1 \
       --kv-cache-dtype {kv_cache_dtype} \

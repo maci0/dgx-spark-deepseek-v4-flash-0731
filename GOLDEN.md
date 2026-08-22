@@ -1,4 +1,4 @@
-# Golden deployment: anemll NVFP4, 2.0M KV, 2x DGX Spark
+# Golden deployment: anemll NVFP4, ~2.0M KV, 2x DGX Spark
 
 The shipped configuration as of 2026-08-22. Every number below is measured on
 this cluster with one harness, not quoted from upstream.
@@ -13,9 +13,12 @@ curl -s http://192.168.0.211:8000/v1/chat/completions \
   -d '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"hi"}],"max_tokens":64}'
 ```
 
-The aliases are declared with `--served-model-name` **alongside** the full HF
-path, not instead of it, so existing clients keep working and swapping the
-underlying checkpoint later does not force every caller to change.
+`--served-model-name` **replaces** the default name rather than adding to it, so
+the full HF path is no longer accepted. `/v1/models` lists exactly
+`deepseek-v4-flash` and `dsv4`. Any client still configured with
+`drowzeys/keys-DeepSeekV4-Flash-GA-0731-Dspark-Abliterated-32-32` must be
+updated. The upside is that swapping the underlying checkpoint later does not
+force callers to change, since they bind to the alias.
 
 ```bash
 bash ~/spark-launch.sh anemll-nvfp4.yaml ~/anemll.log
@@ -37,6 +40,15 @@ curl -s localhost:8000/health                       # 200
 | `max_cudagraph_capture_size` | 36 | exactly `max_num_seqs x (k+1)`; nothing reachable is dropped |
 | `max_model_len` | 1,048,576 | full 1M context |
 | patches | **none** | stock image |
+| tool calling | `--tool-call-parser deepseek_v4 --enable-auto-tool-choice` | verified with a live `tool_choice: auto` request |
+| reasoning | `--reasoning-parser deepseek_v4` | same parser family |
+| tokenizer | `--tokenizer-mode deepseek_v4` | the parsers depend on model-specific chat-template tokenization; `auto` makes them unreliable rather than absent |
+
+> **Diff feature flags, not just performance, when switching recipes.** Moving
+> from `eugr-prod.yaml` to this one silently dropped tool calling and reasoning
+> parsing, which surfaced only as a client-side
+> `400 "auto" tool choice requires --enable-auto-tool-choice`. Capacity and
+> throughput were compared carefully; the feature flags were not.
 
 ## 2. Measured, three lineages, one harness
 
@@ -45,7 +57,7 @@ tok/s. Prompt choice matters enormously here: see §5.
 
 | | **anemll (shipped)** | eugr + PIECEWISE | stage-c (tonyd2wild) |
 |---|---:|---:|---:|
-| KV pool | **2,002,497** | 1,768,024 | 1,438,916 |
+| KV pool | **1,971,682 - 2,002,497** | 1,659,937 - 1,768,024 | 1,438,916 |
 | bytes/token | **7,650** | 11,317 | ~11,900 |
 | max concurrency @ 1M | **1.91x** | 1.58x | 1.37x |
 | c1 | 51.4 | 54.3 | **56.1** |
@@ -57,6 +69,12 @@ tok/s. Prompt choice matters enormously here: see §5.
 anemll wins on capacity (+13% over eugr, +39% over stage-c) and on multi-client
 throughput (c3 +25%, c6 +45%). It gives up ~5% at c1, which is the least
 relevant case for a 5-client workload.
+
+**The KV pool varies ~1.5% between boots of an identical recipe** (measured
+2,002,497 and 1,971,682). vLLM derives it from free memory observed during
+profiling, so page cache and whatever else is resident at that moment move it.
+Treat the range as normal and do not read a lower number after a restart as a
+regression.
 
 ## 3. The NVFP4 saving is real here, and only here
 
@@ -79,7 +97,7 @@ which is the difference.
 | util | KV pool | outcome |
 |---|---:|---|
 | 0.835 (MiaAI-Lab's value) | 2,227,486 | allocates, worker SIGKILLed during **FlashInfer sparse-MLA autotune** |
-| **0.82** | **2,002,497** | **serves** |
+| **0.82** | **1,971,682 - 2,002,497** | **serves** |
 
 The failure is not graph capture and not the arena. It is FlashInfer's
 autotuning step allocating workspaces on top of a 16.25 GiB arena. The eugr
