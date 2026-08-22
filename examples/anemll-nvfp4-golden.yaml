@@ -1,0 +1,64 @@
+# DeepSeek V4 Flash 0731 (abliterated), NVFP4 KV, DSpark, on the anemll runtime.
+#
+# Flags follow the MiaAI-Lab reference recipe, which reports ~2.49M KV tokens and
+# ~160-190 tok/s aggregate at c6 on this image. Only the model differs (their
+# recipe uses the base checkpoint; this uses the abliterated one).
+#
+# Why this image: it is the only one of the three lineages tested that both ships
+# nvfp4_ds_mla (17 files) AND lacks the over-broad upstream guard
+# `cache_dtype.startswith("nvfp4") and use_mla` that makes the dtype unreachable
+# on eugr and on upstream nightly.
+recipe_version: "2"
+model: drowzeys/keys-DeepSeekV4-Flash-GA-0731-Dspark-Abliterated-32-32
+runtime: vllm
+container: ghcr.io/anemll/dspark-vllm-gx10:0.1.1
+min_nodes: 2
+
+executor_config:
+  entrypoint: ""
+
+metadata:
+  description: DeepSeek V4 Flash abliterated, NVFP4 KV + DSpark, anemll runtime
+
+defaults:
+  port: 8000
+  host: 0.0.0.0
+  tensor_parallel: 2
+  # MiaAI's text-mode value. The KV pool is the point of this config, so this is
+  # the first thing to re-tune if the reported ~2.49M is not reproduced.
+  gpu_memory_utilization: 0.82
+  kv_cache_dtype: nvfp4_ds_mla
+  max_model_len: 1048576
+  block_size: 256
+  max_num_seqs: 6
+  max_num_batched_tokens: 8192
+  # Must cover max_num_seqs x (k+1) = 6 x 6 = 36. A stale literal silently
+  # truncates capture and costs decode throughput.
+  max_cudagraph_capture_size: 36
+  long_prefill_token_threshold: 1024
+  num_speculative_tokens: 5
+
+env:
+  VLLM_USE_BREAKABLE_CUDAGRAPH: "0"
+  VLLM_PREFIX_CACHE_RETENTION_INTERVAL: "4096"
+
+command: |
+  vllm serve {model} \
+      --host {host} \
+      --port {port} \
+      --trust-remote-code \
+      --tensor-parallel-size {tensor_parallel} \
+      --pipeline-parallel-size 1 \
+      --kv-cache-dtype {kv_cache_dtype} \
+      --block-size {block_size} \
+      --max-model-len {max_model_len} \
+      --max-num-seqs {max_num_seqs} \
+      --max-num-batched-tokens {max_num_batched_tokens} \
+      --long-prefill-token-threshold {long_prefill_token_threshold} \
+      --enable-chunked-prefill \
+      --async-scheduling \
+      --max-cudagraph-capture-size {max_cudagraph_capture_size} \
+      --gpu-memory-utilization {gpu_memory_utilization} \
+      --moe-backend flashinfer_b12x \
+      --generation-config vllm \
+      --speculative-config '{{"method":"dspark","num_speculative_tokens":{num_speculative_tokens},"draft_sample_method":"probabilistic"}}'
