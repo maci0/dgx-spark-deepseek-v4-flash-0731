@@ -116,10 +116,42 @@ would buy cross-session reuse rather than capacity that is currently short.
 
 ### ~2.5M KV: not on this config
 
-NVFP4 KV (~6.6 KB/token) would reach it, but DeepSeek-V4 cannot use `nvfp4_ds_mla`
-on the eugr image: the dtype is generic MLA support (none of its 10 files are
-under `models/deepseek_v4/`), while DeepSeek-V4 has its own attention path whose
-sm12x class is fp8-only. Details in [EUGR_B12X_PROD.md](EUGR_B12X_PROD.md) §4.
+NVFP4 KV is the only way to reach it. `nvfp4_ds_mla` **can** be enabled on the
+eugr image with an 89-line patch (see
+[vllm-spark-nvfp4](https://github.com/maci0/vllm-spark-nvfp4)
+`Dockerfile.eugr-nvfp4`), correcting the earlier claim here that the capability
+was absent. It allocates, passes the forward pass, and is measurably cheaper per
+token. It is still **not competitive**, and the reason is worth recording.
+
+| | eugr `fp8_ds_mla` (shipped) | eugr + NVFP4 patch |
+|---|---:|---:|
+| bytes/token | 11,315 | **8,864 (-22%)** |
+| best KV pool | **1,674,044** | 1,507,777 |
+| serves | **yes** | no |
+| c5 tok/s | **140.2** | never reached |
+| cudagraphs | `FULL_AND_PIECEWISE` | OOMs in PIECEWISE capture |
+
+**Correction: the per-token saving is not real.** An earlier version of this
+section called it "reproduced three ways". Those three readings were not
+independent, they all derive from the same page-size computation. Direct
+measurement in `TUNING.md` puts fp8 at 9,094 B/token and nvfp4_ds_mla at 9,083,
+i.e. identical, and both known implementations of the format use the same
+584-byte envelope. The 8,864 figure is one KV group being sized with a
+432-byte generic-NVFP4 page while the writer emits 584, a 26% **under**
+allocation. See [EUGR_NVFP4.md](https://github.com/maci0/vllm-spark-nvfp4/blob/main/EUGR_NVFP4.md) §4.
+
+Nor is non-KV memory the obstacle: inverting vLLM's own sizing formula
+(`available_kv = util x total - non_kv - cudagraph_estimate`) gives 90.90 GiB
+non-KV for the fp8 run and 91.89 GiB for the NVFP4 run, a difference of
+**+0.98 GiB**, which is the pre-profiling dequant staging buffer in
+`flashinfer.py`. The apparent ~6 GiB gap was simply the 0.04 utilization given
+back. **NVFP4 is not the route past 1.7M.**
+
+The patch itself is correct and independently useful (it is a legitimate eugr
+contribution, and unlike open PR
+[#311](https://github.com/eugr/spark-vllm-docker/pull/311) it makes the stock
+b12x image NVFP4-capable in 89 lines rather than wrapping a third-party runtime
+in 25,000). It is simply not a better production config today.
 
 The alternative, [`examples/stagec-nvfp4-prod.yaml`](examples/stagec-nvfp4-prod.yaml),
 **does** serve 2,198,373 tokens, and is the right choice only if total context is
@@ -133,6 +165,69 @@ the binding constraint:
 | recipe | **73 lines, 0 hooks** | 344 lines, 2 `pre_exec` hooks |
 
 The newer image is both newer and faster; stage-c's only advantage is capacity.
+
+### The two routes that looked like they reach ~2.5M
+
+> **Tested 2026-08-22. Route 1 does not work here.** Pinning the pool was run at
+> 19, 22, 24 and 26.3 GiB. Every size **allocates** (up to 2,740,813 tokens,
+> matching nepenth's figure exactly) and every size **fails to run**, dying in
+> workspace allocation or swapping the node to a standstill. The blocker is the
+> b12x workspace footprint, and `deep_gemm` is not available here because the
+> module is not installed in the eugr image at all. Route 2 (PP=2) remains
+> untested. Full ladder and teardown traps in [KV_CEILING.md](KV_CEILING.md).
+
+Both are on `fp8_ds_mla`, the dtype already shipped here. Neither needs NVFP4.
+
+**1. Pin the KV pool instead of inferring it from utilization.**
+[`nepenth/deepseek-v4-flash-gb10`](https://github.com/nepenth/deepseek-v4-flash-gb10)
+(2026-08-21) runs the same checkpoint, TP=2, `max_num_seqs 6`, DSpark k=5, and
+reports:
+
+```
+Available KV cache memory: 26.3 GiB
+GPU KV cache size: 2,740,813 tokens
+Maximum concurrency for 1,048,576 tokens per request: 2.61x
+```
+
+with a 1.04M three-needle retrieval PASS, so it is validated beyond the boot
+line. The lever is `--kv-cache-memory 28235618304` at GMU **0.84**, which is
+*lower* than the 0.89 used here. Pinning the pool sidesteps the utilization
+cliff entirely (0.89 serves, 0.91 gets SIGKILLed) rather than searching for it.
+At the measured 11,161 B/token, ~26.0 GiB clears 2.5M.
+
+**2. Pipeline parallel instead of tensor parallel.**
+vLLM replicates the MLA latent KV on every rank and never head-shards it, so
+under TP=2 **both nodes hold the same KV** and half the pool is a duplicate.
+Under PP=2 each rank builds only its half of the layers, so the per-worker
+`num_blocks = available_memory // page_size // num_layers` doubles:
+
+| config | B/token/node | cluster tokens |
+|---|---:|---:|
+| TP=2 (current) | 11,315 | 1,651,180 |
+| **PP=2** | ~5,658 | **~3,302,000** |
+
+Costs: pipeline bubbles (mitigate with `--async-scheduling`), the DSpark drafter
+pinned to the last stage clamping `num_blocks` via `min()` (rebalance with
+`VLLM_PP_LAYER_PARTITION=31,30`), and b12x backends under PP are unverified.
+The usual "TP beats PP" result assumes fast intra-node fabric; here TP=2 is
+inherently cross-node with no GPUDirect RDMA, so PP may also be faster.
+
+### Known trap in the current config
+
+`cudagraph_mode: FULL_AND_PIECEWISE` plus chunked prefill is reported to hang
+DeepSeek-V4-Flash on sm_12x after 5-6 requests
+([vllm#40969](https://github.com/vllm-project/vllm/issues/40969), open); the
+confirmed workaround is `PIECEWISE`. Also watch for a **negative** "Estimated
+CUDA graph memory" line on unified memory
+([vllm#46932](https://github.com/vllm-project/vllm/issues/46932)): being
+subtracted, it inflates the KV budget into an OOM.
+
+### Images evaluated and rejected
+
+| source | why not |
+|---|---|
+| [blackwell-llm-docker](https://github.com/local-inference-lab/blackwell-llm-docker) (`voipmonitor/vllm`, `voipmonitor/sglang`) | **amd64 only**, every tag in all three repos. Targets RTX PRO 6000 Blackwell (SM120, 96 GB discrete VRAM), not GB10 (sm_121a, arm64, unified). Its DSv4 compose is single-node TP=2 across two local GPUs at `util 0.975` and `max_model_len 131072`; none of those assumptions hold when the OS shares the same DRAM. |
+| TensorRT-LLM | `get_sm_version()` returns **121** on GB10, which matches no branch: `== 120` misses it, `is_sm_100f()` is `>=100 and <110`. Its DSA sparse-attention guards are `>= 100`, so they *admit* SM121 and then run SM100-built kernels that abort at launch. No published 2-node DGX Spark reproduction exists. |
 
 ## 5. Still untested
 

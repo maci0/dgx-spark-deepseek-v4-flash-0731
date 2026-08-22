@@ -15,7 +15,8 @@ Scope is intentionally narrow: **this one checkpoint, this one hardware**. Not a
 - **[TROUBLESHOOTING.md](TROUBLESHOOTING.md)**: symptom → cause → fix table for every failure hit here.
 - **[PRODUCTION.md](PRODUCTION.md)** ← **START HERE**: the shipped production config, every value justified by measurement, plus what this hardware cannot do (SSD offload, ~2.5M KV) and why.
 - **[EUGR_B12X_PROD.md](EUGR_B12X_PROD.md)**: **the production path**: eugr b12x image, fp8_ds_mla KV, DSpark, 1.65M tokens, measured c1-c6. Includes why `nvfp4_ds_mla` is closed on this image.
-- **[PROD_C5_SSD.md](PROD_C5_SSD.md)**: production config: 5 clients, **SSD KV offload** (works; UPSTREAM_GAPS #7 was too pessimistic), param minimization, node housekeeping. **Not yet serving:** its NVFP4 KV pool dies in warmup.
+- **[KV_CEILING.md](KV_CEILING.md)**: why ~2.5M KV is unreachable here. The full measured ladder (17.8 → 26.3 GiB arenas, all of which allocate, none above 17.8 of which run), the `--kv-cache-memory-bytes` semantics that make it counterintuitive, and the `docker rm -f` teardown trap that invalidated four runs.
+- **[PROD_C5_SSD.md](PROD_C5_SSD.md)**: production config: 5 clients, param minimization, node housekeeping. **Two claims in it are now disproven by testing:** SSD KV offload does *not* work (it faults under every KV dtype, see [KV_OFFLOAD_MLA.md](https://github.com/maci0/vllm-spark-nvfp4/blob/main/KV_OFFLOAD_MLA.md) §"Tested end to end"), and its NVFP4 KV pool dies in warmup.
 - **[examples/.env.dspark.example](examples/.env.dspark.example)** · **[scripts/clean-restart.sh](scripts/clean-restart.sh)** · **[scripts/bench.py](scripts/bench.py)**
 
 ## Topology
